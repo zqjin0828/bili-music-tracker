@@ -64,7 +64,7 @@ function collectFromManifest(manifest) {
 // 附带一起打包的文档与工具（非必需，但方便分发时带着说明）
 const EXTRA_DOCS = [
   'README.md', 'README.old.md', 'DESIGN.md', 'DESIGN-AI.md', 'AI-SETUP.md',
-  'tools/process-queue.js', 'tools/demo-queue.json'
+  'tools/install.ps1', 'tools/process-queue.js', 'tools/demo-queue.json'
 ];
 
 // ★ 间接依赖收集：manifest 之外还「藏着」两类必打文件

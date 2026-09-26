@@ -257,26 +257,55 @@ AI 纠正为 千本桜|original
 
 ### 安装（开发者模式加载）
 
+> ⚠️ **先明确一件事**：`chrome://extensions/` 的「加载已解压的扩展程序」**只接受文件夹，不接受 `.zip`**。
+> 你没法把压缩包直接拖进浏览器安装 —— Chrome 不会替你解压。**必须先解压**。
+
+#### 方式 A：下载 Release 压缩包（推荐普通用户）
+
+1. 到 [Releases](https://github.com/zqjin0828/bili-music-tracker/releases) 下载最新的
+   `bili-music-tracker-v1.3.1.zip`
+2. **解压**到一个固定目录（比如 `%USERPROFILE%\bili-music-tracker`）
+3. 打开 `chrome://extensions/` → 右上角开「**开发者模式**」
+4. 点左上角「**加载已解压的扩展程序**」→ 选择**解压出的那个文件夹**
+5. 首次加载会请求 **Cookie** 权限（用于读取 `bili_jct` 以支持一键新建收藏夹），点「允许」
+
+**可选：用脚本自动完成 2、3 步**
+
+把 `tools/install.ps1` 和 zip 放在同一目录，然后运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+脚本会：校验 zip → 解压到 `%USERPROFILE%\bili-music-tracker` → 检查 8 个关键文件是否齐全
+→ 把路径复制到剪贴板 → 自动打开 `chrome://extensions/`。
+你只需要点「加载已解压的扩展程序」然后 `Ctrl+V` 粘贴路径。
+
+#### 方式 B：克隆源码（推荐开发者）
+
 ```bash
-# 1. 克隆或下载本项目
 git clone git@github.com:zqjin0828/bili-music-tracker.git
 cd bili-music-tracker
 ```
 
-```
-2. 打开浏览器，地址栏输入   chrome://extensions/    回车
-3. 右上角打开              「开发者模式」开关
-4. 点左上角                「加载已解压的扩展程序」
-5. 选择本项目文件夹         bili-music-tracker
-```
+然后在浏览器里加载 `bili-music-tracker` 文件夹本身即可，无需打包。
+
+#### 为什么不能做「一键安装」
+
+| 方式 | 可行性 |
+|---|---|
+| 拖 `.zip` 进扩展页 | ✗ Chrome 不解压，无反应或报错 |
+| 拖 `.crx` 进扩展页 | ✗ **Chrome 136+ 已彻底关闭**（本项目正要求 136+） |
+| 上架 Chrome Web Store | 需 $5 开发者费 + 审核，且本项目会读 B 站 Cookie，审核风险高 |
+| 上架 Edge Add-ons | 免费、审核较快，代码可通用 —— 但同样卡权限审核 |
+| **开发者模式加载文件夹** | ✓ 本项目采用此方式 |
 
 安装成功后，扩展图标上会显示**当前最高播放次数**。
 
-> 💡 **更新已有版本**：改完代码后回到 `chrome://extensions/`，点扩展卡片上的**刷新图标**，
+> 💡 **更新已有版本**：回到 `chrome://extensions/`，点扩展卡片上的**刷新图标**，
 > 然后刷新 B 站页面（content script 需要重新注入）。
 >
-> 💡 **v1.3.1 起需要 `cookies` 权限**（用于读取 `bili_jct` 以支持一键新建收藏夹）。
-> 首次加载时浏览器可能弹权限确认，点允许即可。
+> 💡 **v1.3.1 起需要 `cookies` 权限**。如果你装的是 v1.3.0 及更早版本，升级后需重新授权。
 
 ### 初始化收藏夹索引
 
@@ -587,7 +616,8 @@ bili-music-tracker/
 │   └── popup.js               #   弹窗逻辑
 │
 ├── tools/                     # 开发与运维脚本
-│   ├── pack.js                #   ★ 打包扩展 zip（从 manifest 自动推导清单 + 自检）
+│   ├── pack.js                #   ★ 打包扩展 zip（自动推导清单 + 双向引用自检）
+│   ├── install.ps1            #   ★ 用户侧一键安装（校验/解压/检查/复制路径/开扩展页）
 │   ├── process-queue.js       #   队列处理（调 API 并产出结果文件）
 │   ├── demo-queue.json        #   演示用队列样本
 │   ├── analyze-tids.js        #   分区 tid 分布分析
