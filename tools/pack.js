@@ -63,9 +63,68 @@ function collectFromManifest(manifest) {
 
 // 附带一起打包的文档与工具（非必需，但方便分发时带着说明）
 const EXTRA_DOCS = [
-  'README.md', 'DESIGN.md', 'DESIGN-AI.md', 'AI-SETUP.md',
+  'README.md', 'README.old.md', 'DESIGN.md', 'DESIGN-AI.md', 'AI-SETUP.md',
   'tools/process-queue.js', 'tools/demo-queue.json'
 ];
+
+// ★ 间接依赖收集：manifest 之外还「藏着」两类必打文件
+//
+// 曾经的坑（v1.3.1 打包时发现）：pack.js 只从 manifest 推导清单，
+// 会漏掉两类文件，打出的包加载即坏：
+//   1) background.js 里 importScripts(...) 引入的脚本 —— manifest 只声明了
+//      background.js，ai.js / ai-client.js / parser.js / fav-index.js 都得追进去
+//   2) popup.html 里 <script src> / <link href> 引用的同目录文件 —— manifest
+//      只声明了 default_popup: popup/popup.html，popup.js / popup.css 会漏
+// 现在递归解析这两类引用并自动并入打包清单。
+const IMPORT_RE = /importScripts\s*\(([^)]*)\)/g;
+const SRC_RE = /<script[^>]+src\s*=\s*["']([^"']+)["']/gi;
+const LINK_RE = /<link[^>]+href\s*=\s*["']([^"']+)["']/gi;
+
+function resolveIndirect(seedSet) {
+  const out = new Set(seedSet);
+  const queue = [...seedSet];
+
+  while (queue.length) {
+    const rel = queue.pop();
+    const full = path.join(ROOT, rel);
+    if (!fs.existsSync(full)) continue;
+    const ext = path.extname(rel).toLowerCase();
+
+    let text = null;
+    if (ext === '.js') text = fs.readFileSync(full, 'utf8');
+    else if (ext === '.html' || ext === '.htm') text = fs.readFileSync(full, 'utf8');
+    if (text === null) continue;
+
+    const found = [];
+    if (ext === '.js') {
+      let m;
+      IMPORT_RE.lastIndex = 0;
+      while ((m = IMPORT_RE.exec(text))) {
+        // importScripts('a.js', 'b.js') → 拆出每个字符串字面量
+        const inner = m[1];
+        const litRe = /["']([^"']+)["']/g;
+        let lm;
+        while ((lm = litRe.exec(inner))) found.push(lm[1]);
+      }
+    } else {
+      let m;
+      SRC_RE.lastIndex = 0;
+      while ((m = SRC_RE.exec(text))) found.push(m[1]);
+      LINK_RE.lastIndex = 0;
+      while ((m = LINK_RE.exec(text))) found.push(m[1]);
+    }
+
+    for (const ref of found) {
+      if (/^(https?:)?\/\//i.test(ref) || ref.startsWith('data:')) continue; // 外链跳过
+      // 以引用文件所在目录为基准解析相对路径
+      const resolved = path.posix.normalize(
+        path.posix.join(path.posix.dirname(rel), ref)
+      ).replace(/^\.\//, '');
+      if (!out.has(resolved)) { out.add(resolved); queue.push(resolved); }
+    }
+  }
+  return out;
+}
 
 // ---------- CRC32 ----------
 
@@ -173,8 +232,8 @@ function buildZip(files) {
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
 const version = manifest.version;
 
-// 从 manifest 自动推导 + 追加文档
-const autoSet = collectFromManifest(manifest);
+// 从 manifest 自动推导 + 追间接依赖 + 追加文档
+const autoSet = resolveIndirect(collectFromManifest(manifest));
 const INCLUDE = ['manifest.json', ...Array.from(autoSet).sort(), ...EXTRA_DOCS];
 
 const files = [];
@@ -194,15 +253,42 @@ if (missing.length) {
   process.exit(1);
 }
 
-// ★ 自检：manifest 里声明的脚本必须全部在包里
-const declared = collectFromManifest(manifest);
+// ★ 自检：包里的每个 JS/HTML 文件所引用的本地资源，必须也在包里
+// （双向校验 —— 旧版只查「manifest 声明的都打了吗」，查不出反向遗漏）
 const packed = new Set(files.map(f => f.name));
-const unpacked = [...declared].filter(d => !packed.has(d));
-if (unpacked.length) {
-  console.error('❌ 打包自检失败：以下 manifest 声明的文件未打进包：' + unpacked.join(', '));
+const refProblems = [];
+for (const f of files) {
+  const ext = path.extname(f.name).toLowerCase();
+  if (ext !== '.js' && ext !== '.html' && ext !== '.htm') continue;
+  const text = f.data.toString('utf8');
+  const refs = [];
+  if (ext === '.js') {
+    let m; IMPORT_RE.lastIndex = 0;
+    while ((m = IMPORT_RE.exec(text))) {
+      const litRe = /["']([^"']+)["']/g; let lm;
+      while ((lm = litRe.exec(m[1]))) refs.push(lm[1]);
+    }
+  } else {
+    let m; SRC_RE.lastIndex = 0;
+    while ((m = SRC_RE.exec(text))) refs.push(m[1]);
+    LINK_RE.lastIndex = 0;
+    while ((m = LINK_RE.exec(text))) refs.push(m[1]);
+  }
+  for (const ref of refs) {
+    if (/^(https?:)?\/\//i.test(ref) || ref.startsWith('data:')) continue;
+    const resolved = path.posix.normalize(
+      path.posix.join(path.posix.dirname(f.name), ref)
+    ).replace(/^\.\//, '');
+    if (!packed.has(resolved)) refProblems.push(`${f.name} → ${resolved}`);
+  }
+}
+if (refProblems.length) {
+  console.error('❌ 打包自检失败：以下被引用的文件未打进包：');
+  for (const p of refProblems) console.error('   · ' + p);
   process.exit(1);
 }
-console.log('自检通过：manifest 声明的 ' + declared.size + ' 个文件全部已打包');
+console.log('自检通过：manifest 声明的 ' + collectFromManifest(manifest).size +
+            ' 个文件 + 间接依赖均已打包，包内引用完整');
 
 const zip = buildZip(files);
 const distDir = path.join(ROOT, 'dist');
