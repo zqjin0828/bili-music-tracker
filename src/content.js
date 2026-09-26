@@ -246,6 +246,30 @@
 
   // ---------- 上报 background ----------
 
+  /**
+   * ★ v1.3：上报前先做「已收藏」二次校验（DOM，实时）
+   *
+   * 本地索引可能滞后（刚点了收藏，索引还没刷新），所以这里读一次页面上的
+   * 收藏按钮状态，随 payload 一起上报。background 会合并「索引 | DOM」判定。
+   */
+  function readDomFaved() {
+    try {
+      const F = window.BiliFavIndex;
+      if (F && typeof F.readDomFavState === 'function') {
+        return !!F.readDomFavState().faved;
+      }
+      // 兜底：内联一份简易判断
+      const nodes = document.querySelectorAll('.video-fav, [class*="video-fav"]');
+      for (const el of nodes) {
+        const cls = String(el.className || '');
+        const txt = (el.textContent || '').trim();
+        if (/\b(on|active|actived|faved|selected)\b/.test(cls)) return true;
+        if (/已收藏|已加入/.test(txt)) return true;
+      }
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
   async function reportPlay(watchedSeconds) {
     const meta = state.meta;
     const parsed = state.parsed || { songName: meta.title, version: '', artist: '' };
@@ -273,22 +297,33 @@
       songKey,
       songName: parsed.songName,
       version: parsed.version,
-      artist: parsed.artist
+      artist: parsed.artist,
+      // ★ v1.3：带上 DOM 收藏状态，供后台合并判定
+      domFaved: readDomFaved()
     };
 
     try {
       const res = await chrome.runtime.sendMessage({ type: 'RECORD_PLAY', payload });
       if (res && res.ok) {
-        log('已记录一次播放', res.data);
+        const d = res.data || {};
+
+        // ★ 已收藏 → 明确告诉用户「不再计数」，而不是静默丢弃
+        if (d.counted === false && d.reason === 'already-faved') {
+          showToast('这首已在「歌」收藏夹，不再计数 ✓');
+          log('已收藏，跳过计数', d.favedSource);
+          return;
+        }
+
+        log('已记录一次播放', d);
         const maxCount = Math.max(
-          res.data.videoPlayCount || 0,
-          res.data.songPlayCount || 0
+          d.videoPlayCount || 0,
+          d.songPlayCount || 0
         );
         if (state.settings.threshold && maxCount < state.settings.threshold) {
           showToast(`已听 ${maxCount} / ${state.settings.threshold} 次`);
         }
         // 提示 AI 处理情况（只在队列模式下提示一次，不打扰）
-        const ai = res.data.ai;
+        const ai = d.ai;
         if (ai && ai.source === 'queue' && ai.queued) {
           log('已加入 AI 判定队列');
         } else if (ai && ai.source === 'direct' && ai.failed) {
@@ -386,13 +421,72 @@
   // ---------- 收藏辅助 ----------
 
   /**
+   * ★ 构造收藏夹页 URL（v1.3.1 修复）
+   *
+   * 踩过的坑：
+   *   旧代码跳的是 `https://space.bilibili.com/favlist`（**没有 mid**），
+   *   实测该地址直接返回 **404「出错啦!」** —— 这就是「收藏后跳过去页面不存在」的原因。
+   *
+   * 正确形态（实测 200）：
+   *   https://space.bilibili.com/<mid>/favlist              我的收藏夹总入口
+   *   https://space.bilibili.com/<mid>/favlist?fid=<mediaId> 直接打开某个夹
+   *
+   * @returns {Promise<string>} 可用的 URL；拿不到 mid 时返回总入口兜底
+   */
+  async function buildFavUrl(mediaId) {
+    let mid = state.selfMid || '';
+    if (!mid) {
+      try {
+        const r = await chrome.runtime.sendMessage({ type: 'FAV_GET_SELF_MID' });
+        if (r && r.ok && r.data && r.data.mid) {
+          mid = String(r.data.mid);
+          state.selfMid = mid;
+        }
+      } catch (e) { /* ignore */ }
+    }
+    if (!mid) {
+      // 实在拿不到 mid：退回「我的收藏」总页（该页不依赖 mid）
+      return 'https://www.bilibili.com/account/favlist';
+    }
+    const base = `https://space.bilibili.com/${mid}/favlist`;
+    return mediaId ? `${base}?fid=${mediaId}` : base;
+  }
+
+  /**
    * 半自动收藏：
    *  1) 尝试点击页面原生收藏按钮展开面板
-   *  2) 面板出现后，在收藏夹列表里找目标收藏夹（默认「歌」）并高亮
-   *  3) 失败则复制歌名到剪贴板 + 打开收藏夹页
+   *  2) 面板出现后，在收藏夹列表里找目标收藏夹（默认「歌」，含溢出夹「歌2」…）并高亮
+   *  3) 失败则复制歌名到剪贴板 + 打开**正确的**收藏夹页
    */
   async function assistFavorites(n) {
-    const favName = (state.settings && state.settings.favFolderName) || '歌';
+    const baseName = (state.settings && state.settings.favFolderName) || '歌';
+
+    // 0) ★ 先问后台：当前该往哪个夹收（「歌」满了就自动指向「歌2」）
+    let targetName = baseName;
+    let targetId = null;
+    let capTip = '';
+    try {
+      const cr = await chrome.runtime.sendMessage({ type: 'FAV_CAP_CHECK' });
+      if (cr && cr.ok && cr.data) {
+        const d = cr.data;
+        if (d.allFull) {
+          // 全满 → 提示建新夹
+          showFullFolderCard(d.nextName, d.base);
+          return;
+        }
+        // chain 里第一个是主夹；若主夹已满则应指向下一个
+        const usable = (d.chain || []).find(f => {
+          const st = BiliFavIndex.capStatus ? BiliFavIndex.capStatus(f.count, f) : null;
+          return !st || st.level !== 'full';
+        });
+        if (usable) { targetName = usable.title; targetId = usable.mediaId; }
+        const mainFull = (d.chain || []).some(f =>
+          BiliFavIndex.capStatus && BiliFavIndex.capStatus(f.count, f).level === 'full');
+        if (mainFull && usable && usable.title !== baseName) {
+          capTip = `「${baseName}」已满，已切到「${targetName}」`;
+        }
+      }
+    } catch (e) { /* 降级为原名 */ }
 
     // 1) 找收藏按钮
     const favBtn = document.querySelector(
@@ -404,14 +498,20 @@
       favBtn.click();
     }
 
-    // 2) 等面板出现
+    // 2) 等面板出现（同时匹配主夹与溢出夹）
     const folder = await waitFor(() => {
       const items = document.querySelectorAll(
         '.fav-list li, .folder-list li, .fav-folder-item, [class*="fav"] [class*="folder"] li'
       );
+      // 优先精确匹配目标名
       for (const li of items) {
         const txt = (li.textContent || '').trim();
-        if (txt.includes(favName)) return li;
+        if (txt === targetName || txt.startsWith(targetName)) return li;
+      }
+      // 退而求其次：主夹名
+      for (const li of items) {
+        const txt = (li.textContent || '').trim();
+        if (txt.includes(baseName)) return li;
       }
       return null;
     }, 2500);
@@ -419,11 +519,14 @@
     if (folder) {
       folder.classList.add('bmt-folder-hit');
       folder.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      showToast(`已为你定位到「${favName}」，勾选它即可收藏`);
+      // ★ 面板里若已有「歌2」，把主夹那个挪后，避免用户点错（视觉上由 .bmt-folder-hit 引导）
+      showToast(capTip || `已为你定位到「${targetName}」，勾选它即可收藏`);
+      // 收藏动作完成后，把该 bvid 立刻写进本地索引（不等 30 分钟全量刷新）
+      watchFavConfirm(n, targetId);
       return;
     }
 
-    // 3) 降级：复制歌名 + 打开收藏夹页
+    // 3) 降级：复制歌名 + 打开正确的收藏夹页
     const songName = n.songName || n.title || '';
     try {
       await navigator.clipboard.writeText(songName);
@@ -431,9 +534,95 @@
     } catch (e) {
       showToast('请手动收藏，歌名：' + truncate(songName, 24));
     }
-    setTimeout(() => {
-      window.open('https://space.bilibili.com/favlist', '_blank');
-    }, 800);
+    const url = await buildFavUrl(targetId);
+    setTimeout(() => { window.open(url, '_blank'); }, 800);
+  }
+
+  /**
+   * ★ 收藏成功后立刻把 bvid 加进本地索引（避免重复计数）
+   * 轮询页面收藏按钮状态：从「未收藏」变「已收藏」即认为收藏成功。
+   */
+  function watchFavConfirm(n, mediaId) {
+    if (!n || !n.bvid) return;
+    if (readDomFaved()) {
+      // 点开面板前就已经是已收藏状态
+      chrome.runtime.sendMessage({
+        type: 'SET_OVERRIDE', key: n.bvid, value: 'mark-faved', level: 'video'
+      }).catch(() => {});
+      return;
+    }
+    let tries = 0;
+    const iv = setInterval(async () => {
+      tries++;
+      if (readDomFaved()) {
+        clearInterval(iv);
+        try {
+          await chrome.runtime.sendMessage({
+            type: 'FAV_MARK_ADDED', bvid: n.bvid, mediaId: mediaId || null
+          });
+        } catch (e) { /* ignore */ }
+        showToast('已收藏 ✓ 计入索引，之后不再重复计数');
+        return;
+      }
+      if (tries > 150) clearInterval(iv);   // 30 秒后放弃
+    }, 200);
+  }
+
+  /**
+   * ★ 收藏夹全满时的引导卡片：一键新建「歌2」
+   */
+  function showFullFolderCard(nextName, baseName) {
+    const card = document.createElement('div');
+    card.className = 'bmt-card';
+    card.innerHTML = `
+      <div class="bmt-head">
+        <span class="bmt-emoji">📁</span>
+        <span class="bmt-title">「${escapeHtml(baseName || '歌')}」已满 1000 首</span>
+        <button class="bmt-close" title="关闭">×</button>
+      </div>
+      <div class="bmt-body">
+        <div class="bmt-song">要不要新建一个「${escapeHtml(nextName)}」继续收藏？</div>
+        <div class="bmt-video-title">B站单个自建收藏夹上限 1000 首。新建后插件会自动把它纳入索引与收藏目标，你不需要再改任何设置。</div>
+      </div>
+      <div class="bmt-actions">
+        <button class="bmt-btn bmt-primary">新建「${escapeHtml(nextName)}」</button>
+        <button class="bmt-btn bmt-ghost">我自己去建</button>
+      </div>
+    `;
+
+    const close = () => { card.remove(); state.cards = state.cards.filter(c => c !== card); };
+    card.querySelector('.bmt-close').addEventListener('click', close);
+    card.querySelector('.bmt-ghost').addEventListener('click', close);
+    card.querySelector('.bmt-primary').addEventListener('click', async () => {
+      const btn = card.querySelector('.bmt-primary');
+      btn.disabled = true;
+      btn.textContent = '新建中…';
+      try {
+        const r = await chrome.runtime.sendMessage({ type: 'FAV_CREATE_FOLDER', title: nextName });
+        if (r && r.ok) {
+          showToast(`已新建「${nextName}」，索引刷新中`);
+          close();
+          setTimeout(() => {
+            window.open(
+              `https://space.bilibili.com/${state.selfMid || ''}/favlist`,
+              '_blank'
+            );
+          }, 600);
+        } else {
+          btn.disabled = false;
+          btn.textContent = `新建「${nextName}」`;
+          const err = (r && (r.error || r.code)) || '未知错误';
+          showToast('新建失败：' + err + '（可去网页端手动新建）');
+        }
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = `新建「${nextName}」`;
+        showToast('新建失败，请去网页端手动新建');
+      }
+    });
+
+    document.body.appendChild(card);
+    state.cards.push(card);
   }
 
   function waitFor(fn, timeout) {
@@ -762,10 +951,36 @@
     if (!msg) return;
     if (msg.type === 'THRESHOLD_REACHED') {
       const list = msg.notifications || [];
-      // 只弹与当前页相关的，或全部弹（最多 2 张）
-      list.slice(0, 2).forEach(showThresholdCard);
-      sendResponse({ ok: true });
-      return;
+
+      // ★ v1.3：弹卡片前二次校验「是否已收藏」
+      //   场景：刚好在达标那一刻用户点了收藏，或者索引刚更新过。
+      //   此时不该再打扰用户。用后台索引 + DOM 双重确认。
+      (async () => {
+        const toShow = [];
+        for (const n of list.slice(0, 2)) {
+          const bvid = n.bvid || '';
+          let faved = readDomFaved();          // DOM 实时状态优先
+
+          if (!faved && bvid) {
+            // 后台索引再确认一次
+            try {
+              const r = await chrome.runtime.sendMessage({ type: 'FAV_CHECK_BVID', bvid });
+              if (r && r.ok && r.data && r.data.faved) faved = true;
+            } catch (e) { /* ignore */ }
+          }
+
+          if (faved) {
+            log('已收藏，跳过提醒卡片', bvid);
+            continue;
+          }
+          toShow.push(n);
+        }
+
+        if (toShow.length) toShow.forEach(showThresholdCard);
+        else showToast('已在「歌」收藏夹，无需重复收藏 ✓');
+        sendResponse({ ok: true, shown: toShow.length });
+      })();
+      return true;   // 异步响应
     }
     if (msg.type === 'PING') {
       sendResponse({ ok: true, meta: state.meta, detection: state.detection });

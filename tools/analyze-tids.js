@@ -15,7 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const FAV = process.env.BILI_FAV_DIR || path.resolve(__dirname, '..');
+const FAV = '__HOME__/WorkBuddy/2026-09-18-01-36-00/bili-fav-from-history';
 const OUT = __dirname;
 
 const f5 = JSON.parse(fs.readFileSync(path.join(FAV, 'final.json'), 'utf8'));

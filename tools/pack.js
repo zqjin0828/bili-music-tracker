@@ -14,15 +14,57 @@ const zlib = require('zlib');
 
 const ROOT = path.resolve(__dirname, '..');
 
-// 打包清单（显式列出，避免把测试和开发文件塞进去）
-const INCLUDE = [
-  'manifest.json', 'background.js',
-  'src/parser.js', 'src/detector.js', 'src/ai.js', 'src/ai-client.js',
-  'src/content.js', 'src/card.css',
-  'popup/popup.html', 'popup/popup.css', 'popup/popup.js',
-  'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png',
-  'tools/process-queue.js', 'tools/demo-queue.json',
-  'README.md', 'DESIGN.md', 'DESIGN-AI.md', 'AI-SETUP.md'
+// ★ 自动从 manifest 推导需要打包的文件（避免手工清单漏文件）
+//
+// 曾经的坑：v1.3 新增 src/fav-index.js 后，硬编码清单没同步更新，
+// 打出的包里缺了这个文件 → 加载扩展直接报错。
+// 改为自动推导后，新增脚本无需再改这里。
+function collectFromManifest(manifest) {
+  const set = new Set();
+
+  const addFile = (rel) => { if (rel) set.add(rel.replace(/^\.\//, '')); };
+
+  if (manifest.manifest_version === 3) {
+    if (manifest.background && manifest.background.service_worker) {
+      addFile(manifest.background.service_worker);
+    }
+    if (Array.isArray(manifest.background && manifest.background.scripts)) {
+      manifest.background.scripts.forEach(addFile);
+    }
+  } else if (manifest.background) {
+    if (manifest.background.page) addFile(manifest.background.page);
+    (manifest.background.scripts || []).forEach(addFile);
+  }
+
+  for (const cs of manifest.content_scripts || []) {
+    (cs.js || []).forEach(addFile);
+    (cs.css || []).forEach(addFile);
+  }
+
+  if (manifest.action && manifest.action.default_popup) addFile(manifest.action.default_popup);
+  if (manifest.options_page) addFile(manifest.options_page);
+  if (manifest.options_ui && manifest.options_ui.page) addFile(manifest.options_ui.page);
+  if (manifest.devtools_page) addFile(manifest.devtools_page);
+
+  const icons = manifest.icons || {};
+  Object.values(icons).forEach(addFile);
+  if (manifest.action && manifest.action.default_icon) {
+    const di = manifest.action.default_icon;
+    if (typeof di === 'string') addFile(di);
+    else Object.values(di).forEach(addFile);
+  }
+
+  for (const war of manifest.web_accessible_resources || []) {
+    (war.resources || []).forEach(addFile);
+  }
+
+  return set;
+}
+
+// 附带一起打包的文档与工具（非必需，但方便分发时带着说明）
+const EXTRA_DOCS = [
+  'README.md', 'DESIGN.md', 'DESIGN-AI.md', 'AI-SETUP.md',
+  'tools/process-queue.js', 'tools/demo-queue.json'
 ];
 
 // ---------- CRC32 ----------
@@ -131,6 +173,10 @@ function buildZip(files) {
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
 const version = manifest.version;
 
+// 从 manifest 自动推导 + 追加文档
+const autoSet = collectFromManifest(manifest);
+const INCLUDE = ['manifest.json', ...Array.from(autoSet).sort(), ...EXTRA_DOCS];
+
 const files = [];
 let missing = [];
 let rawTotal = 0;
@@ -147,6 +193,16 @@ if (missing.length) {
   console.error('缺少文件：' + missing.join(', '));
   process.exit(1);
 }
+
+// ★ 自检：manifest 里声明的脚本必须全部在包里
+const declared = collectFromManifest(manifest);
+const packed = new Set(files.map(f => f.name));
+const unpacked = [...declared].filter(d => !packed.has(d));
+if (unpacked.length) {
+  console.error('❌ 打包自检失败：以下 manifest 声明的文件未打进包：' + unpacked.join(', '));
+  process.exit(1);
+}
+console.log('自检通过：manifest 声明的 ' + declared.size + ' 个文件全部已打包');
 
 const zip = buildZip(files);
 const distDir = path.join(ROOT, 'dist');

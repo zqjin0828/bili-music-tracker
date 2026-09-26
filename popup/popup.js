@@ -7,10 +7,15 @@
 let store = null;
 let currentTab = 'songs';
 let threshold = 5;
+let favStatus = null;   // { hasIndex, mediaId, folderTitle, count, fetchedAt, stale, skipFaved }
 
 // ---------- 工具 ----------
 
 const $ = (id) => document.getElementById(id);
+
+function favNameOf() {
+  return (store && store.settings && store.settings.favFolderName) || '歌';
+}
 
 function escapeHtml(s) {
   return String(s || '').replace(/[&<>"']/g, c => ({
@@ -63,8 +68,83 @@ async function load() {
   if (res && res.ok) {
     store = res.data;
     threshold = store.settings.threshold || 5;
+    // ★ v1.3：同时拉索引状态
+    try {
+      const fr = await chrome.runtime.sendMessage({ type: 'FAV_GET_STATUS' });
+      if (fr && fr.ok) favStatus = fr.data;
+    } catch (e) { favStatus = null; }
     render();
+    renderFavBar();
   }
+}
+
+// ---------- 收藏夹索引状态条 ----------
+
+function renderFavBar() {
+  const el = $('favBar');
+  if (!el) return;
+  const s = favStatus;
+  const name = favNameOf();
+
+  if (!s) {
+    el.innerHTML = `<div class="favbar-line"><span class="favbar-text">收藏夹索引：未初始化</span>
+      <button class="mini-btn" data-act="favRefresh">建立索引</button></div>`;
+    return;
+  }
+  if (!s.hasIndex) {
+    el.innerHTML = `<div class="favbar-line"><span class="favbar-text">收藏夹索引：未建立（无法判断是否已收藏）</span>
+      <button class="mini-btn" data-act="favRefresh">建立索引</button></div>`;
+    return;
+  }
+
+  const when = s.fetchedAt ? fmtTime(s.fetchedAt) : '';
+  const staleTag = s.stale ? ' <span class="badge suspect">已过期</span>' : '';
+  const weeklyTag = s.weeklyEnabled
+    ? `<span class="favbar-sub">每周全量重建 · 上次 ${s.weeklyAt ? fmtTime(s.weeklyAt) : '未做过'}</span>`
+    : '<span class="favbar-sub">每周重建已关闭</span>';
+
+  // ★ 容量条：主夹 + 各溢出夹
+  let capHtml = '';
+  const cap = s.cap;
+  if (cap) {
+    const pct = Math.min(100, Math.round(cap.ratio * 100));
+    const cls = cap.level === 'full' ? 'danger' : cap.level === 'warn' ? 'warn' : '';
+    const tip = cap.level === 'full'
+      ? `已满！新建「${escapeHtml(s.nextName || name + '2')}」继续收藏`
+      : cap.level === 'warn'
+        ? `快满了，仅剩 ${cap.remain} 首`
+        : `还可再收 ${cap.remain} 首`;
+    capHtml = `
+      <div class="cap-wrap ${cls}">
+        <div class="cap-bar"><div class="cap-fill" style="width:${pct}%"></div></div>
+        <div class="cap-text">容量 ${cap.count} / ${cap.cap} · ${tip}</div>
+      </div>`;
+  }
+
+  // 溢出夹链
+  let chainHtml = '';
+  if (Array.isArray(s.chain) && s.chain.length > 1) {
+    chainHtml = `<div class="favbar-sub">收藏夹链：${s.chain.map(f => {
+      const tag = f.level === 'full' ? '（满）' : '';
+      return `「${escapeHtml(f.title)}」${f.count}${tag}`;
+    }).join(' → ')}</div>`;
+  }
+
+  el.innerHTML = `
+    <div class="favbar-line">
+      <span class="favbar-text">
+        「${escapeHtml(s.folderTitle || name)}」已索引 <b>${s.count}</b> 首 · ${when}${staleTag}
+        ${s.skipFaved ? '' : '<span class="badge suspect">未启用跳过</span>'}
+      </span>
+      <button class="mini-btn" data-act="favRefresh">刷新</button>
+    </div>
+    ${capHtml}
+    ${chainHtml}
+    <div class="favbar-line">
+      ${weeklyTag}
+      <button class="mini-btn" data-act="favNewFolder" data-name="${escapeHtml(s.nextName || (name + '2'))}">新建「${escapeHtml(s.nextName || (name + '2'))}」</button>
+    </div>
+  `;
 }
 
 // ---------- 渲染 ----------
@@ -119,6 +199,13 @@ function render() {
     }
     if (isSong && item.artist) badges.push(`<span class="badge ver">${escapeHtml(truncate(item.artist, 10))}</span>`);
     if (reached) badges.push('<span class="badge reached">已达标</span>');
+    // ★ v1.3：已收藏标记
+    if (!isSong && item.faved) {
+      const srcTip = item.favedSource === 'index' ? '来自收藏夹索引'
+        : item.favedSource === 'dom' ? '页面收藏状态'
+        : item.favedSource === 'manual' ? '你手动标记的' : '';
+      badges.push(`<span class="badge faved" title="${escapeHtml(srcTip)}">✓ 已在「${escapeHtml(favNameOf())}」</span>`);
+    }
     if (!isSong && item.excluded) badges.push('<span class="badge excluded">已排除</span>');
     if (!isSong && item.isMusic === false && !item.excluded) {
       badges.push('<span class="badge suspect">疑似非音乐</span>');
@@ -160,6 +247,12 @@ function render() {
       }
       if (item.aiStatus === 'applied') {
         actions.push(`<button class="mini-btn" data-act="recheck" data-key="${escapeHtml(item.key)}">重新判定</button>`);
+      }
+      // ★ v1.3：手动标注收藏状态
+      if (item.faved) {
+        actions.push(`<button class="mini-btn" data-act="mark-not-faved" data-key="${escapeHtml(item.key)}" data-level="video">取消收藏标记</button>`);
+      } else {
+        actions.push(`<button class="mini-btn" data-act="mark-faved" data-key="${escapeHtml(item.key)}" data-level="video">标为已收藏</button>`);
       }
       actions.push(`<button class="mini-btn danger" data-act="delete" data-key="${escapeHtml(item.key)}" data-level="video">删除</button>`);
     } else {
@@ -218,6 +311,63 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
+  // ★ v1.3：手动标注收藏状态
+  if (act === 'mark-faved' || act === 'mark-not-faved') {
+    await chrome.runtime.sendMessage({ type: 'SET_OVERRIDE', key, value: act, level: 'video' });
+    toast(act === 'mark-faved' ? '已标为已收藏，不再计数' : '已取消收藏标记');
+    await load();
+    return;
+  }
+
+  if (act === 'favRefresh') {
+    toast('正在建立索引…');
+    const r = await chrome.runtime.sendMessage({ type: 'FAV_REFRESH_INDEX', force: true });
+    if (r && r.ok) {
+      const d = r.data || {};
+      const chainN = d.chainLen > 1 ? `（${d.chainLen} 个夹）` : '';
+      toast(`索引完成：${d.count} 首${chainN}${d.allFull ? ' · 收藏夹已满' : ''}`);
+    } else {
+      toast('索引失败：' + ((r && (r.error || (r.data && r.data.error))) || '未知错误'));
+    }
+    await load();
+    return;
+  }
+
+  // ★ 新建溢出收藏夹（「歌」满了之后）
+  if (act === 'favNewFolder') {
+    const name = btn.dataset.name || (favNameOf() + '2');
+    const ok = confirm(
+      `新建收藏夹「${name}」？\n\n` +
+      'B站单个自建收藏夹上限 1000 首，满了之后新建一个即可继续收藏。\n' +
+      '建好后插件会自动把它纳入索引与收藏目标，无需再改设置。'
+    );
+    if (!ok) return;
+    toast('正在新建…');
+    const r = await chrome.runtime.sendMessage({ type: 'FAV_CREATE_FOLDER', title: name });
+    if (r && r.ok) {
+      toast(`已新建「${name}」`);
+      // 建完打开新夹
+      try {
+        const fr = await chrome.runtime.sendMessage({ type: 'FAV_GET_STATUS' });
+        const mid = (fr && fr.data && fr.data.mid) || '';
+        const id = r.data && r.data.id;
+        const url = mid
+          ? `https://space.bilibili.com/${mid}/favlist${id ? '?fid=' + id : ''}`
+          : 'https://www.bilibili.com/account/favlist';
+        chrome.tabs.create({ url });
+      } catch (e) { /* ignore */ }
+    } else {
+      const err = (r && (r.error || r.code)) || '未知错误';
+      alert(
+        `新建失败：${err}\n\n` +
+        '可能原因：未登录 / 收藏夹数量已达上限 / 触发风控。\n' +
+        '可去网页端「我的收藏 → 新建收藏夹」手动创建，建好后点「刷新」即可。'
+      );
+    }
+    await load();
+    return;
+  }
+
   if (act === 'delete') {
     const ok = confirm('确定删除这条记录吗？此操作不可恢复。');
     if (!ok) return;
@@ -260,6 +410,11 @@ function fillSettings() {
   const s = store.settings;
   $('setThreshold').value = s.threshold;
   $('setFavName').value = s.favFolderName || '歌';
+  // ★ v1.3.1：已收藏检测 / 多夹 / 索引刷新
+  if ($('setSkipFaved')) $('setSkipFaved').checked = s.skipFaved !== false;
+  if ($('setFavOverflow')) $('setFavOverflow').checked = s.favOverflowEnabled !== false;
+  if ($('setFavWeekly')) $('setFavWeekly').checked = s.favIndexWeeklyEnabled !== false;
+  if ($('setFavRefreshMin')) $('setFavRefreshMin').value = s.favIndexRefreshMinutes || 30;
   $('setVideoLevel').checked = !!s.videoLevel;
   $('setSongLevel').checked = !!s.songLevel;
   $('setMergeSimilar').checked = s.mergeSimilarVersions !== false;
@@ -312,6 +467,11 @@ $('btnSave').addEventListener('click', async () => {
   const patch = {
     threshold: Math.max(1, Math.min(99, Number($('setThreshold').value) || 5)),
     favFolderName: ($('setFavName').value || '歌').trim(),
+    // ★ v1.3.1
+    skipFaved: $('setSkipFaved') ? $('setSkipFaved').checked : true,
+    favOverflowEnabled: $('setFavOverflow') ? $('setFavOverflow').checked : true,
+    favIndexWeeklyEnabled: $('setFavWeekly') ? $('setFavWeekly').checked : true,
+    favIndexRefreshMinutes: Math.max(5, Math.min(1440, Number($('setFavRefreshMin') && $('setFavRefreshMin').value) || 30)),
     videoLevel: $('setVideoLevel').checked,
     songLevel: $('setSongLevel').checked,
     mergeSimilarVersions: $('setMergeSimilar').checked,

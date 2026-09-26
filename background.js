@@ -11,9 +11,9 @@
 
 'use strict';
 
-importScripts('src/parser.js', 'src/ai.js', 'src/ai-client.js');
+importScripts('src/parser.js', 'src/ai.js', 'src/ai-client.js', 'src/fav-index.js');
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const DEFAULT_SETTINGS = {
   threshold: 5,
@@ -27,6 +27,13 @@ const DEFAULT_SETTINGS = {
   favFolderName: '歌',
   mergeSimilarVersions: true, // Live/重制版并入原曲计数
   debugHud: true,             // 页面左下角显示累计进度（Alt+M 可切换）
+
+  // ---- 已收藏检测（v1.3 新增）----
+  skipFaved: true,            // ★ 已在收藏夹的视频不再计数、不再提醒
+  favIndexRefreshMinutes: 30, // 索引自动刷新间隔（分钟）
+  favIndexMaxAgeHours: 24,    // 索引超过此时长视为过期，判定时降级用 DOM
+  favIndexWeeklyEnabled: true,// ★ 每周强制全量重建一次索引（防长期漂移）
+  favOverflowEnabled: true,   // ★ 「歌」满了自动切到「歌2」「歌3」…
 
   // ---- AI ----
   aiChannel: 'off',            // off | queue | direct
@@ -44,7 +51,8 @@ const DEFAULT_SETTINGS = {
 async function getStore() {
   const data = await chrome.storage.local.get([
     'schemaVersion', 'settings', 'videoStats', 'songStats',
-    'pendingQueue', 'aiResults', 'aiCache', 'aiStats'
+    'pendingQueue', 'aiResults', 'aiCache', 'aiStats',
+    'favIndex', 'favFolders', 'favIndexes', 'favIndexWeeklyAt'
   ]);
   return {
     schemaVersion: data.schemaVersion || SCHEMA_VERSION,
@@ -54,7 +62,16 @@ async function getStore() {
     pendingQueue: data.pendingQueue || {},
     aiResults: data.aiResults || {},
     aiCache: data.aiCache || {},
-    aiStats: data.aiStats || { calls: 0, cached: 0, failed: 0, tokensIn: 0, tokensOut: 0 }
+    aiStats: data.aiStats || { calls: 0, cached: 0, failed: 0, tokensIn: 0, tokensOut: 0 },
+    // { mediaId, folderTitle, bvids: [], aids: [], count, fetchedAt, hasMore }
+    favIndex: data.favIndex || null,
+    // ★ 多夹索引：主夹 + 溢出夹（「歌2」「歌3」…）
+    //   { [mediaId]: { mediaId, folderTitle, bvids, aids, count, total, hasMore, fetchedAt } }
+    favIndexes: data.favIndexes || null,
+    // 每周强制重建的时间戳
+    favIndexWeeklyAt: data.favIndexWeeklyAt || 0,
+    // 收藏夹列表缓存（供 popup 选择目标夹）
+    favFolders: data.favFolders || null
   };
 }
 
@@ -84,7 +101,313 @@ async function refreshBadge() {
   }
 }
 
-// ---------- 核心：记录一次有效播放 ----------
+// ---------- 收藏夹索引（v1.3）----------
+
+/**
+ * 收藏夹索引的意义：
+ *
+ *   Service Worker 里可以带 Cookie 跨域 fetch B 站接口（有 host_permissions），
+ *   所以由后台统一拉取，内容脚本只管读结果。
+ *
+ *   ★ 为什么用「拉全量建索引」而不是「按 bvid 查」：
+ *     接口 /x/v3/fav/resource/ids?bvid=xxx 需要 WBI 签名，未签名实测返回 -400。
+ *     而 /x/v3/fav/resource/list?media_id=xx 不需要签名，分页拉全量即可。
+ *     「歌」收藏夹 276 条 → 14 页（ps=20），成本可接受，且判定时零延迟。
+ */
+
+const FAV_API = 'https://api.bilibili.com/x/v3/fav';
+
+async function favApiGet(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const r = await fetch(url, {
+      signal: ctrl.signal,
+      credentials: 'include',
+      headers: { 'Accept': 'application/json, text/plain, */*' }
+    });
+    const j = await r.json();
+    return j;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 拉取当前账号的所有收藏夹列表
+ * @returns {Promise<{ok: boolean, folders: Array, error?: string}>}
+ */
+async function fetchFavFolders() {
+  const store = await getStore();
+  const mid = await getSelfMid();
+  const url = `${FAV_API}/folder/created/list-all?up_mid=${mid || ''}`;
+
+  try {
+    const j = await favApiGet(url);
+    if (!j || j.code !== 0 || !j.data || !j.data.list) {
+      return { ok: false, folders: [], error: (j && j.message) || 'bad-response' };
+    }
+    const folders = BiliFavIndex.normalizeFolders(j.data);
+    await setStore({ favFolders: { list: folders, fetchedAt: Date.now() } });
+    return { ok: true, folders };
+  } catch (e) {
+    return { ok: false, folders: [], error: String(e && e.message || e) };
+  }
+}
+
+let selfMidCache = null;
+async function getSelfMid() {
+  if (selfMidCache) return selfMidCache;
+  try {
+    const j = await favApiGet('https://api.bilibili.com/x/web-interface/nav');
+    if (j && j.code === 0 && j.data && j.data.mid) {
+      selfMidCache = j.data.mid;
+      return selfMidCache;
+    }
+  } catch (e) { /* 未登录或失败 */ }
+  return '';
+}
+
+/**
+ * 拉单个收藏夹的全量 BV（分页）
+ * @returns {Promise<{ok, bvids, aids, total, hasMore, error}>}
+ */
+async function fetchFolderAllBvids(mediaId) {
+  const bvids = [];
+  const aids = [];
+  const MAX_PAGES = 80;
+  const PS = 20;
+  let hasMore = false;
+  let total = 0;
+
+  for (let pn = 1; pn <= MAX_PAGES; pn++) {
+    const u = `${FAV_API}/resource/list?media_id=${mediaId}&pn=${pn}&ps=${PS}` +
+      '&order=mtime&type=0&tid=0&platform=web';
+    let j;
+    try {
+      j = await favApiGet(u);
+    } catch (e) {
+      return { ok: false, error: String(e && e.message || e), bvids, aids, total, hasMore };
+    }
+    if (!j || j.code !== 0 || !j.data || !Array.isArray(j.data.medias)) {
+      return { ok: false, error: (j && j.message) || 'bad-response', bvids, aids, total, hasMore };
+    }
+    if (!j.data.medias.length) break;
+
+    for (const m of j.data.medias) {
+      if (m.bvid) bvids.push(m.bvid);
+      if (m.id) aids.push(String(m.id));
+    }
+    total += j.data.medias.length;
+    hasMore = !!j.data.has_more;
+    if (!hasMore) break;
+    await new Promise(r => setTimeout(r, 160));   // 限速防风控
+  }
+
+  return {
+    ok: true,
+    bvids: Array.from(new Set(bvids)),
+    aids: Array.from(new Set(aids)),
+    total,
+    hasMore
+  };
+}
+
+/**
+ * ★ 构建/刷新收藏夹索引（v1.3.1：支持多夹滚动 + 容量检测）
+ *
+ * 索引范围 = 主夹（「歌」）+ 所有溢出夹（「歌2」「歌3」…）。
+ * 这样「歌」满了之后用户新建「歌2」，插件会自动把它也纳入索引与收藏目标。
+ *
+ * @param {object} opts { folderName, force }
+ * @returns {Promise<object>} { ok, mediaId, folderTitle, count, error, cap }
+ */
+async function refreshFavIndex(opts) {
+  const o = opts || {};
+  const store = await getStore();
+  const wanted = o.folderName || store.settings.favFolderName || '歌';
+
+  // 1) 拿收藏夹列表（优先用缓存，除非 force）
+  let folders = (store.favFolders && store.favFolders.list) || [];
+  if (!folders.length || o.force) {
+    const r = await fetchFavFolders();
+    if (!r.ok) return { ok: false, error: r.error };
+    folders = r.folders;
+  }
+
+  // 2) 选目标夹链：主夹 + 溢出夹（排除「歌？」这类干扰项）
+  const allowOverflow = store.settings.favOverflowEnabled !== false;
+  let picked;
+  if (allowOverflow) {
+    picked = BiliFavIndex.pickUsableFolder(folders, wanted, {});
+  } else {
+    const single = BiliFavIndex.pickFolder(folders, wanted);
+    picked = { folder: single.folder, reason: single.reason, chain: single.folder ? [single.folder] : [], full: [] };
+  }
+  if (!picked.folder || !picked.chain.length) {
+    return { ok: false, error: 'folder-not-found', wanted, candidates: folders.map(f => f.title) };
+  }
+
+  // 3) 逐个夹拉全量并建索引
+  const indexes = {};
+  const summary = [];
+  let primary = null;
+
+  for (const f of picked.chain) {
+    const r = await fetchFolderAllBvids(f.id);
+    if (!r.ok) {
+      summary.push({ id: f.id, title: f.title, error: r.error });
+      continue;
+    }
+    const ix = {
+      mediaId: f.id,
+      folderTitle: f.title,
+      matchReason: picked.reason,
+      bvids: r.bvids,
+      aids: r.aids,
+      count: r.bvids.length,
+      total: r.total,
+      hasMore: r.hasMore,
+      fetchedAt: Date.now()
+    };
+    indexes[f.id] = ix;
+    if (!primary) primary = ix;
+
+    const cap = BiliFavIndex.capStatus(f.media_count || r.bvids.length, f);
+    summary.push({
+      id: f.id, title: f.title, count: ix.count,
+      cap: cap.cap, remain: cap.remain, level: cap.level, ratio: cap.ratio
+    });
+  }
+
+  if (!primary) {
+    return { ok: false, error: 'fetch-failed', detail: summary };
+  }
+
+  // 4) 落盘：favIndex 为主夹（向后兼容），favIndexes 为全量
+  const patch = { favIndex: primary, favIndexes: indexes };
+  if (o.weekly) patch.favIndexWeeklyAt = Date.now();
+  await setStore(patch);
+  await refreshBadge();
+
+  const primarySummary = summary.find(s => s.id === primary.mediaId) || null;
+
+  return {
+    ok: true,
+    mediaId: primary.mediaId,
+    folderTitle: primary.folderTitle,
+    matchReason: picked.reason,
+    count: primary.count,
+    total: primary.total,
+    hasMore: primary.hasMore,
+    // ★ 新增：容量与多夹信息
+    cap: primarySummary,
+    folders: summary,
+    chainLen: picked.chain.length,
+    allFull: picked.reason === 'all-full'
+  };
+}
+
+/**
+ * ★ 判断索引是否需要刷新（含「每周强制全量重建」）
+ *
+ * 为什么需要每周强刷：
+ *   增量刷新只知道「加了什么」，如果用户在 B 站网页端手动删了收藏，
+ *   我们无从感知（没有增量接口），索引会永久偏大 → 已删的歌被判成
+ *   「已收藏」而不再计数。所以每周做一次全量重建，纠正漂移。
+ */
+function needsFavRefresh(store) {
+  const s = store.settings;
+  const ix = store.favIndex;
+
+  // 从未建过 → 必刷
+  if (!ix || !ix.fetchedAt) return { need: true, reason: 'no-index' };
+
+  // 每周强制全量重建
+  if (s.favIndexWeeklyEnabled !== false) {
+    const weeklyAt = store.favIndexWeeklyAt || 0;
+    const WEEK = 7 * 24 * 3600 * 1000;
+    if (!weeklyAt || Date.now() - weeklyAt > WEEK) {
+      return { need: true, reason: 'weekly', weeklyAt };
+    }
+  }
+
+  // 超过 maxAge 小时 → 刷
+  if (isIndexStale(ix, s.favIndexMaxAgeHours)) return { need: true, reason: 'stale' };
+
+  return { need: false, reason: 'fresh' };
+}
+
+/** 索引是否过期 */
+function isIndexStale(index, maxAgeHours) {
+  if (!index || !index.fetchedAt) return true;
+  const max = (maxAgeHours || 24) * 3600 * 1000;
+  return (Date.now() - index.fetchedAt) > max;
+}
+
+/** 把某个 bvid 加进本地索引（用户刚收藏时调用，避免等下次全量刷新）*/
+async function addBvidToIndex(bvid) {
+  if (!bvid) return;
+  const store = await getStore();
+  const ix = store.favIndex || {
+    mediaId: null, folderTitle: store.settings.favFolderName || '歌',
+    bvids: [], aids: [], count: 0, total: 0, hasMore: false, fetchedAt: Date.now()
+  };
+  ix.bvids = Array.isArray(ix.bvids) ? ix.bvids : [];
+  if (ix.bvids.indexOf(bvid) < 0) {
+    ix.bvids.push(bvid);
+    ix.count = ix.bvids.length;
+    ix.lastManualAddAt = Date.now();
+    await setStore({ favIndex: ix });
+  }
+}
+
+/** 从本地索引里移除某个 bvid（用户取消收藏时调用）*/
+async function removeBvidFromIndex(bvid) {
+  if (!bvid) return;
+  const store = await getStore();
+  const ix = store.favIndex;
+  if (!ix || !Array.isArray(ix.bvids)) return;
+  const i = ix.bvids.indexOf(bvid);
+  if (i >= 0) {
+    ix.bvids.splice(i, 1);
+    ix.count = ix.bvids.length;
+    ix.lastManualRemoveAt = Date.now();
+    await setStore({ favIndex: ix });
+  }
+}
+
+/**
+ * 后台定时刷新（基于 alarm，Service Worker 会被唤醒）
+ *
+ * 两个 alarm：
+ *   · favIndexRefresh   —— 常规增量刷新（默认每 30 分钟）
+ *   · favIndexWeekly    —— ★ 每周全量重建（纠正「用户在网页端手删收藏」造成的漂移）
+ *
+ * chrome.alarms 的最小周期是 1 分钟；周级周期用 periodInMinutes = 7*24*60。
+ */
+async function scheduleFavIndexRefresh() {
+  const store = await getStore();
+  const mins = Math.max(5, Number(store.settings.favIndexRefreshMinutes) || 30);
+  try {
+    await chrome.alarms.clear('favIndexRefresh');
+    await chrome.alarms.create('favIndexRefresh', { periodInMinutes: mins });
+
+    // ★ 每周全量重建
+    if (store.settings.favIndexWeeklyEnabled !== false) {
+      await chrome.alarms.clear('favIndexWeekly');
+      await chrome.alarms.create('favIndexWeekly', {
+        periodInMinutes: 7 * 24 * 60,     // 7 天
+        delayInMinutes: 60                 // 装完先等 1 小时，别和首次建索引撞车
+      });
+    }
+  } catch (e) {
+    // alarms 权限未声明时静默降级（改用 onStartup + 消息触发）
+    console.warn('[BiliMusicTracker] alarms 不可用，索引仅靠手动/启动刷新', e);
+  }
+}
+
+// ---------- 记录一次有效播放（核心：reportPlay 之上的收口）----------
 
 /**
  * @param {object} payload
@@ -92,7 +415,7 @@ async function refreshBadge() {
  *   watchedSeconds, musicConfidence, isMusic, autoDetected
  */
 async function recordPlay(payload) {
-  const { settings, videoStats, songStats } = await getStore();
+  const { settings, videoStats, songStats, favIndex, favIndexes } = await getStore();
   const now = Date.now();
 
   const videoKey = payload.page && payload.page > 1
@@ -100,6 +423,79 @@ async function recordPlay(payload) {
     : payload.bvid;
 
   const isCompilation = !!payload.isCompilation;
+
+  // ---------- ★ 已收藏检测（v1.3 核心 / v1.3.1 多夹）----------
+  // 若该视频已在**任意目标收藏夹**（「歌」或溢出夹「歌2」「歌3」…）里，
+  // 直接不计、不提醒。
+  // 索引可能过期，所以还叠加 DOM（内容脚本传来的实时状态）双路判定。
+  const indexBvids = new Set();
+  const seenIx = new Set();
+  const pushIx = (ix) => {
+    if (!ix || !Array.isArray(ix.bvids)) return;
+    if (seenIx.has(ix.mediaId)) return;
+    seenIx.add(ix.mediaId);
+    for (const b of ix.bvids) indexBvids.add(b);
+  };
+  pushIx(favIndex);
+  if (favIndexes && typeof favIndexes === 'object') {
+    for (const k of Object.keys(favIndexes)) pushIx(favIndexes[k]);
+  }
+  // 兼容内容脚本透传的索引
+  if (Array.isArray(payload.favIndexes)) for (const ix of payload.favIndexes) pushIx(ix);
+
+  const inIndex = indexBvids.has(payload.bvid);
+  const inDom = !!payload.domFaved;
+  const alreadyFaved = inIndex || inDom;
+
+  // 记录判定来源，便于排查
+  const favedSource = inIndex ? 'index' : (inDom ? 'dom' : 'none');
+
+  if (settings.skipFaved && alreadyFaved) {
+    // 仍然更新视频条目的元信息与「已知收藏」标记，但不加计数
+    let vEntrySkip = videoStats[videoKey];
+    if (!vEntrySkip) {
+      vEntrySkip = {
+        bvid: payload.bvid,
+        cid: payload.cid || 0,
+        page: payload.page || 1,
+        title: payload.title || '',
+        up: payload.up || '',
+        tid: payload.tid || 0,
+        tname: payload.tname || '',
+        duration: payload.duration || 0,
+        playCount: 0,
+        totalWatchSeconds: 0,
+        firstPlayedAt: now,
+        lastPlayedAt: now,
+        musicConfidence: payload.musicConfidence || 0,
+        isMusic: !!payload.isMusic,
+        isCompilation: isCompilation,
+        notified: false,
+        excluded: false,
+        manualOverride: null,
+        ruleRevision: 0,
+        appliedAiRevision: 0,
+        aiTitle: ''
+      };
+    }
+    vEntrySkip.title = payload.title || vEntrySkip.title;
+    vEntrySkip.up = payload.up || vEntrySkip.up;
+    vEntrySkip.cid = payload.cid || vEntrySkip.cid;
+    vEntrySkip.duration = payload.duration || vEntrySkip.duration;
+    vEntrySkip.faved = true;
+    vEntrySkip.favedSource = favedSource;
+    vEntrySkip.favedCheckedAt = now;
+    // 已收藏 → 视为已提醒过，避免后续再弹
+    vEntrySkip.notified = true;
+    videoStats[videoKey] = vEntrySkip;
+    await setStore({ videoStats });
+    return {
+      counted: false,
+      reason: 'already-faved',
+      favedSource,
+      videoPlayCount: vEntrySkip.playCount
+    };
+  }
 
   // ---------- 视频级 ----------
   let vEntry = videoStats[videoKey];
@@ -125,7 +521,9 @@ async function recordPlay(payload) {
       manualOverride: null,   // null | 'music' | 'not-music'
       ruleRevision: 0,
       appliedAiRevision: 0,
-      aiTitle: ''
+      aiTitle: '',
+      faved: false,
+      favedSource: 'none'
     };
   }
 
@@ -141,6 +539,10 @@ async function recordPlay(payload) {
   vEntry.isMusic = vEntry.manualOverride === 'music' ? true
     : vEntry.manualOverride === 'not-music' ? false
     : (payload.isMusic || vEntry.isMusic);
+  // 记录本次的收藏检测结果（false 也要记，便于 popup 展示「未收藏」）
+  vEntry.faved = vEntry.faved || false;
+  vEntry.favedSource = favedSource;
+  vEntry.favedCheckedAt = now;
 
   const effectiveMusic = vEntry.isMusic;
 
@@ -690,6 +1092,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const merged = Object.assign({}, store.settings, msg.patch || {});
           await setStore({ settings: merged });
           await refreshBadge();
+          // ★ 刷新间隔/每周重建可能被改了 → 重排 alarm
+          const p = msg.patch || {};
+          if ('favIndexRefreshMinutes' in p || 'favIndexWeeklyEnabled' in p) {
+            await scheduleFavIndexRefresh();
+          }
+          // ★ 收藏夹名/溢出开关变了 → 立刻按新配置重建索引
+          if ('favFolderName' in p || 'favOverflowEnabled' in p) {
+            refreshFavIndex({ force: true }).catch(() => {});
+          }
           sendResponse({ ok: true, data: merged });
           break;
         }
@@ -719,6 +1130,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 v.excluded = false;
               } else if (value === 'reset-notified') {
                 v.notified = false;
+              } else if (value === 'mark-faved') {
+                // ★ 手动标记为「已收藏」：立刻停止计数并写进索引
+                v.faved = true;
+                v.favedSource = 'manual';
+                v.favedCheckedAt = Date.now();
+                v.notified = true;
+                await addBvidToIndex(v.bvid);
+              } else if (value === 'mark-not-faved') {
+                v.faved = false;
+                v.favedSource = 'manual';
+                v.favedCheckedAt = Date.now();
+                await removeBvidFromIndex(v.bvid);
               }
             }
           }
@@ -876,6 +1299,276 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        // ---------- 收藏夹索引（v1.3）----------
+
+        // 拉取收藏夹某一页（内容脚本按需分页）
+        case 'FAV_FETCH_PAGE': {
+          const { mediaId, pn, ps } = msg;
+          const u = `${FAV_API}/resource/list?media_id=${mediaId}&pn=${pn || 1}&ps=${ps || 20}` +
+            '&order=mtime&type=0&tid=0&platform=web';
+          try {
+            const j = await favApiGet(u);
+            if (!j || j.code !== 0 || !j.data) {
+              sendResponse({ ok: false, error: (j && j.message) || 'bad-response' });
+              break;
+            }
+            sendResponse({
+              ok: true,
+              data: {
+                list: (j.data.medias || []).map(m => ({ bvid: m.bvid, aid: m.id, title: m.title })),
+                has_more: !!j.data.has_more,
+                info: j.data.info ? { id: j.data.info.id, title: j.data.info.title, count: j.data.info.media_count } : null
+              }
+            });
+          } catch (e) {
+            sendResponse({ ok: false, error: String(e && e.message || e) });
+          }
+          break;
+        }
+
+        // 收藏夹列表
+        case 'FAV_GET_FOLDERS': {
+          const force = !!msg.force;
+          const store = await getStore();
+          let folders = (store.favFolders && store.favFolders.list) || [];
+          if (!folders.length || force) {
+            const r = await fetchFavFolders();
+            if (!r.ok) { sendResponse({ ok: false, error: r.error, data: { list: folders } }); break; }
+            folders = r.folders;
+          }
+          const picked = BiliFavIndex.pickFolder(folders, store.settings.favFolderName);
+          sendResponse({
+            ok: true,
+            data: {
+              list: folders,
+              picked: picked.folder ? { id: picked.folder.id, title: picked.folder.title, reason: picked.reason } : null
+            }
+          });
+          break;
+        }
+
+        // 手动刷新索引
+        case 'FAV_REFRESH_INDEX': {
+          const r = await refreshFavIndex({ force: !!msg.force, folderName: msg.folderName });
+          sendResponse({ ok: !!r.ok, data: r, error: r.error });
+          break;
+        }
+
+        // 查询索引状态
+        case 'FAV_GET_STATUS': {
+          const store = await getStore();
+          const ix = store.favIndex;
+          const folders = (store.favFolders && store.favFolders.list) || [];
+          const base = store.settings.favFolderName || '歌';
+
+          // ★ 容量：以「已索引的夹链」逐个算，主夹单独给出
+          const chain = [];
+          if (store.favIndexes && typeof store.favIndexes === 'object') {
+            for (const k of Object.keys(store.favIndexes)) {
+              const one = store.favIndexes[k];
+              const meta = folders.find(f => f.id === one.mediaId) || { title: one.folderTitle, media_count: one.count };
+              const cs = BiliFavIndex.capStatus(one.count, meta);
+              chain.push({
+                mediaId: one.mediaId, title: one.folderTitle, count: one.count,
+                cap: cs.cap, remain: cs.remain, ratio: cs.ratio, level: cs.level
+              });
+            }
+          }
+
+          const primaryCap = ix ? BiliFavIndex.capStatus(ix.count, { title: ix.folderTitle, media_count: ix.count }) : null;
+          const need = needsFavRefresh(store);
+
+          sendResponse({
+            ok: true,
+            data: {
+              hasIndex: !!ix,
+              mediaId: ix ? ix.mediaId : null,
+              folderTitle: ix ? ix.folderTitle : null,
+              count: ix ? ix.count : 0,
+              fetchedAt: ix ? ix.fetchedAt : null,
+              weeklyAt: store.favIndexWeeklyAt || 0,
+              stale: isIndexStale(ix, store.settings.favIndexMaxAgeHours),
+              needRefresh: need.need,
+              needReason: need.reason,
+              skipFaved: store.settings.skipFaved,
+              refreshMinutes: store.settings.favIndexRefreshMinutes,
+              weeklyEnabled: store.settings.favIndexWeeklyEnabled !== false,
+              overflowEnabled: store.settings.favOverflowEnabled !== false,
+              // ★ 容量信息
+              cap: primaryCap,
+              chainCount: chain.length,
+              chain,
+              // 下一个溢出夹的推荐名
+              nextName: BiliFavIndex.nextOverflowName(folders, base),
+              folders
+            }
+          });
+          break;
+        }
+
+        // 取自己的 mid（内容脚本拼收藏夹页 URL 用）
+        case 'FAV_GET_SELF_MID': {
+          const mid = await getSelfMid();
+          sendResponse({ ok: !!mid, data: { mid: mid || '' } });
+          break;
+        }
+
+        // ★ 内容脚本确认用户刚收藏成功 → 立刻写进本地索引
+        case 'FAV_MARK_ADDED': {
+          const bvid = msg.bvid;
+          if (!bvid) { sendResponse({ ok: false, error: 'no-bvid' }); break; }
+          const store = await getStore();
+
+          // 优先写进指定的溢出夹索引，否则写主夹
+          const targetId = msg.mediaId || (store.favIndex && store.favIndex.mediaId);
+          const indexes = Object.assign({}, store.favIndexes || {});
+          let wrote = false;
+          if (targetId && indexes[targetId]) {
+            const one = Object.assign({}, indexes[targetId]);
+            one.bvids = Array.isArray(one.bvids) ? one.bvids.slice() : [];
+            if (one.bvids.indexOf(bvid) < 0) {
+              one.bvids.push(bvid);
+              one.count = one.bvids.length;
+              one.lastManualAddAt = Date.now();
+            }
+            indexes[targetId] = one;
+            wrote = true;
+          }
+
+          const patch = {};
+          if (wrote) patch.favIndexes = indexes;
+          // 主索引也要同步（它决定 badge 与旧字段）
+          const ix = store.favIndex ? Object.assign({}, store.favIndex) : null;
+          if (ix) {
+            ix.bvids = Array.isArray(ix.bvids) ? ix.bvids.slice() : [];
+            if (ix.bvids.indexOf(bvid) < 0) {
+              ix.bvids.push(bvid);
+              ix.count = ix.bvids.length;
+              ix.lastManualAddAt = Date.now();
+            }
+            patch.favIndex = ix;
+          }
+          if (Object.keys(patch).length) await setStore(patch);
+
+          // 顺带把该视频条目标成已收藏
+          const videoStats = store.videoStats;
+          if (videoStats[bvid]) {
+            videoStats[bvid].faved = true;
+            videoStats[bvid].favedSource = 'manual-add';
+            videoStats[bvid].favedCheckedAt = Date.now();
+            videoStats[bvid].notified = true;
+            await setStore({ videoStats });
+          }
+          await refreshBadge();
+          sendResponse({ ok: true, data: { bvid, wroteTo: targetId || null, wrote } });
+          break;
+        }
+
+        // ★ 估算目标收藏夹的容量状态（建夹前用）
+        case 'FAV_CAP_CHECK': {
+          const store = await getStore();
+          const folders = (store.favFolders && store.favFolders.list) || [];
+          const base = store.settings.favFolderName || '歌';
+          const picked = BiliFavIndex.pickUsableFolder(folders, base, {});
+          sendResponse({
+            ok: true,
+            data: {
+              base,
+              chain: picked.chain,
+              full: picked.full,
+              reason: picked.reason,
+              allFull: picked.reason === 'all-full',
+              nextName: BiliFavIndex.nextOverflowName(folders, base),
+              customCap: BiliFavIndex.FOLDER_CAP.CUSTOM
+            }
+          });
+          break;
+        }
+
+        // ★ 新建收藏夹（用于「歌」满了之后开「歌2」）
+        case 'FAV_CREATE_FOLDER': {
+          const title = String(msg.title || '').trim();
+          if (!title) { sendResponse({ ok: false, error: 'empty-title' }); break; }
+          const privacy = Number(msg.privacy) || 0;   // 0=公开 1=私密
+          try {
+            const csrf = await (async () => {
+              try {
+                const c = await chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'bili_jct' });
+                return (c && c.value) || '';
+              } catch (e) { return ''; }
+            })();
+            if (!csrf) { sendResponse({ ok: false, error: 'no-csrf' }); break; }
+
+            const body = new URLSearchParams();
+            body.set('title', title);
+            body.set('privacy', String(privacy));
+            body.set('csrf', csrf);
+
+            const r = await fetch(`${FAV_API}/folder/add`, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: body.toString()
+            });
+            const j = await r.json();
+            if (!j || j.code !== 0) {
+              sendResponse({ ok: false, error: (j && j.message) || 'create-failed', code: j && j.code });
+              break;
+            }
+            // 建完立刻刷新收藏夹列表缓存
+            const fr = await fetchFavFolders();
+            const newId = j.data && (j.data.id || j.data.media_id);
+            if (msg.refreshIndex !== false) {
+              refreshFavIndex({ force: true }).catch(() => {});
+            }
+            sendResponse({
+              ok: true,
+              data: {
+                id: newId,
+                title,
+                folders: fr.ok ? fr.folders : []
+              }
+            });
+          } catch (e) {
+            sendResponse({ ok: false, error: String(e && e.message || e) });
+          }
+          break;
+        }
+
+        // 查询单个 bvid 是否在索引里（供 popup / 内容脚本即时校验）
+        case 'FAV_CHECK_BVID': {
+          const store = await getStore();
+          const bvid = msg.bvid;
+          const ix = store.favIndex;
+          const stale = isIndexStale(ix, store.settings.favIndexMaxAgeHours);
+
+          // ★ 多夹：在任意目标夹里命中即视为已收藏
+          let hitTitle = '';
+          let inIdx = !!(ix && Array.isArray(ix.bvids) && ix.bvids.indexOf(bvid) >= 0);
+          if (inIdx) hitTitle = ix.folderTitle;
+          if (!inIdx && store.favIndexes && typeof store.favIndexes === 'object') {
+            for (const k of Object.keys(store.favIndexes)) {
+              const one = store.favIndexes[k];
+              if (one && Array.isArray(one.bvids) && one.bvids.indexOf(bvid) >= 0) {
+                inIdx = true; hitTitle = one.folderTitle; break;
+              }
+            }
+          }
+
+          sendResponse({
+            ok: true,
+            data: {
+              bvid,
+              faved: inIdx,
+              source: inIdx ? 'index' : 'none',
+              folderTitle: hitTitle || null,
+              indexCount: ix ? ix.count : 0,
+              stale
+            }
+          });
+          break;
+        }
+
         case 'IMPORT_DATA': {
           const incoming = msg.data || {};
           if (!incoming || typeof incoming !== 'object') {
@@ -924,14 +1617,63 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   const store = await getStore();
   const patch = {};
   if (!store.settings.threshold) patch.settings = DEFAULT_SETTINGS;
-  if (!store.schemaVersion) patch.schemaVersion = SCHEMA_VERSION;
+  if (!store.schemaVersion || store.schemaVersion < SCHEMA_VERSION) {
+    patch.schemaVersion = SCHEMA_VERSION;
+    // v2 → v3：给已有视频条目补 faved 字段（默认 false，待下次检测刷新）
+    for (const v of Object.values(store.videoStats)) {
+      if (typeof v.faved === 'undefined') {
+        v.faved = false;
+        v.favedSource = 'migrated';
+      }
+    }
+    patch.videoStats = store.videoStats;
+  }
   if (Object.keys(patch).length) await setStore(patch);
   await refreshBadge();
+  await scheduleFavIndexRefresh();
+
+  // 安装/更新后异步建一次索引（不阻塞）
+  refreshFavIndex({ force: false }).catch(e => {
+    console.warn('[BiliMusicTracker] 初始索引构建失败（稍后可手动刷新）', e);
+  });
+
   if (details.reason === 'install') {
     console.log('[BiliMusicTracker] 安装完成，默认阈值 5 次');
   }
 });
 
-// Service Worker 唤醒时同步一次 badge
-chrome.runtime.onStartup.addListener(refreshBadge);
+// 定时刷新收藏夹索引
+try {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (!alarm) return;
+    if (alarm.name === 'favIndexRefresh') {
+      refreshFavIndex({ force: false }).catch(() => {});
+    } else if (alarm.name === 'favIndexWeekly') {
+      // ★ 每周全量重建：force=true 重新拉收藏夹列表，并记录 weeklyAt
+      console.log('[BiliMusicTracker] 每周索引全量重建开始');
+      refreshFavIndex({ force: true, weekly: true }).catch(() => {});
+    }
+  });
+} catch (e) { /* alarms 权限缺失时忽略 */ }
+
+// Service Worker 唤醒时同步一次 badge + 检查索引新鲜度
+chrome.runtime.onStartup.addListener(async () => {
+  await refreshBadge();
+  const store = await getStore();
+  const need = needsFavRefresh(store);
+  if (need.need) {
+    refreshFavIndex({ force: need.reason === 'weekly', weekly: need.reason === 'weekly' }).catch(() => {});
+  }
+});
+
 refreshBadge();
+// Service Worker 冷启动时，若需要刷新则补建
+(async () => {
+  try {
+    const store = await getStore();
+    const need = needsFavRefresh(store);
+    if (need.need) {
+      refreshFavIndex({ force: need.reason === 'weekly', weekly: need.reason === 'weekly' }).catch(() => {});
+    }
+  } catch (e) { /* ignore */ }
+})();

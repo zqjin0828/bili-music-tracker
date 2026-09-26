@@ -26,6 +26,32 @@
     </div>
     <div class="field">
       <label class="switch-row">
+        <input id="setSkipFaved" type="checkbox" checked>
+        <span>已在收藏夹的歌不再重复计数/提醒</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="switch-row">
+        <input id="setFavOverflow" type="checkbox" checked>
+        <span>「歌」满了自动改用「歌2」「歌3」…继续收藏</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="switch-row">
+        <input id="setFavWeekly" type="checkbox" checked>
+        <span>每周全量重建一次收藏夹索引（纠正手动删收藏造成的漂移）</span>
+      </label>
+    </div>
+    <div class="field">
+      <label>索引刷新间隔（分钟）</label>
+      <input id="setFavRefreshMin" type="number" min="5" max="1440" value="30">
+    </div>
+    <div class="hint-note">
+      ⓘ B站**单个自建收藏夹上限 1000 首**（默认收藏夹 5 万）。满了之后新建一个
+      「歌2」即可，插件会自动把它纳入索引，无需再改任何设置。
+    </div>
+    <div class="field">
+      <label class="switch-row">
         <input id="setVideoLevel" type="checkbox" checked>
         <span>启用视频级计数（同一 BV 号听几次）</span>
       </label>
@@ -188,6 +214,9 @@
       <button class="tab active" data-tab="songs">歌曲榜</button>
       <button class="tab" data-tab="videos">视频榜</button>
     </div>
+
+    <!-- ★ v1.3：收藏夹索引状态条 -->
+    <div class="fav-bar" id="favBar"></div>
 
     <div id="list" class="list"></div>
     <div id="empty" class="empty hidden">
