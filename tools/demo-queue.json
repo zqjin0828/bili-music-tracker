@@ -1,0 +1,54 @@
+{
+  "exportedAt": "2026-09-18T01:40:00.000Z",
+  "count": 2,
+  "items": [
+    {
+      "key": "BV1xx411c7mD",
+      "bvid": "BV1xx411c7mD",
+      "page": 1,
+      "title": "【作業用BGM】夏のアニソンメドレー 50曲",
+      "desc": "収録曲一覧: 1. 残酷な天使のテーゼ 2. 創聖のアクエリオン ...",
+      "up": "アニソンch",
+      "tid": 3,
+      "tname": "音乐",
+      "duration": 5400,
+      "part": "",
+      "ruleResult": {
+        "isMusic": true,
+        "isCompilation": false,
+        "songName": "夏のアニソンメドレー",
+        "artist": "",
+        "version": "original",
+        "confidence": 0.62
+      },
+      "optimisticSongKey": "夏のアニソンメドレー|original",
+      "ruleRevision": 1,
+      "addedAt": 1758100000000,
+      "status": "pending"
+    },
+    {
+      "key": "BV1yy411c7mE",
+      "bvid": "BV1yy411c7mE",
+      "page": 1,
+      "title": "【弾き語り】Lemon / 米津玄師 を歌ってみた",
+      "desc": "本家様: 米津玄師 / ギター: 私",
+      "up": "歌い手A",
+      "tid": 31,
+      "tname": "翻唱",
+      "duration": 260,
+      "part": "",
+      "ruleResult": {
+        "isMusic": true,
+        "isCompilation": false,
+        "songName": "Lemon",
+        "artist": "米津玄師",
+        "version": "翻唱",
+        "confidence": 0.7
+      },
+      "optimisticSongKey": "lemon|翻唱",
+      "ruleRevision": 1,
+      "addedAt": 1758100100000,
+      "status": "pending"
+    }
+  ]
+}

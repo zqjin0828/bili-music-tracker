@@ -1,0 +1,195 @@
+/* card.css — 提醒卡片 + Toast 样式（注入到 B 站页面） */
+
+/* ---------- 阈值提醒卡片 ---------- */
+.bmt-card {
+  position: fixed;
+  right: 24px;
+  bottom: 96px;
+  z-index: 2147483000;
+  width: 320px;
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.16), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+  animation: bmt-slide-in 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity 0.4s ease, transform 0.4s ease;
+}
+
+@keyframes bmt-slide-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.bmt-card.bmt-fading {
+  opacity: 0.35;
+  transform: translateY(6px);
+}
+
+.bmt-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #fb7299 0%, #fc9db8 100%);
+  color: #fff;
+}
+
+.bmt-emoji { font-size: 16px; line-height: 1; }
+
+.bmt-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.bmt-close {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+.bmt-close:hover { background: rgba(255, 255, 255, 0.2); color: #fff; }
+
+.bmt-body { padding: 14px; }
+
+.bmt-song {
+  font-size: 15px;
+  font-weight: 600;
+  color: #18191c;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.bmt-ver {
+  font-size: 12px;
+  font-weight: 400;
+  color: #fb7299;
+  margin-left: 2px;
+}
+
+.bmt-video-title {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #61666d;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.bmt-up {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #9499a0;
+}
+
+.bmt-ai {
+  margin-top: 8px;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #1a6dcc;
+  background: #eef4fe;
+  border-left: 3px solid #4a97e8;
+  border-radius: 4px;
+  word-break: break-word;
+}
+
+/* ---------- 调试面板（Alt+M 开关） ---------- */
+
+.bmt-hud {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2147483000;
+  padding: 8px 11px;
+  border-radius: 8px;
+  background: rgba(24, 25, 28, 0.86);
+  color: #fff;
+  font: 11.5px/1.65 "Cascadia Mono", Consolas, "Microsoft YaHei", monospace;
+  pointer-events: none;
+  user-select: none;
+  max-width: 300px;
+  white-space: nowrap;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+}
+.bmt-hud-row { display: block; }
+.bmt-hud-row b { color: #fb7299; font-weight: 600; margin-right: 2px; }
+
+.bmt-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+
+.bmt-btn {
+  flex: 1;
+  height: 34px;
+  border-radius: 8px;
+  border: none;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-family: inherit;
+}
+
+.bmt-primary {
+  background: #fb7299;
+  color: #fff;
+  flex: 2;
+}
+.bmt-primary:hover { background: #e35c85; }
+.bmt-primary:active { transform: scale(0.98); }
+
+.bmt-ghost {
+  background: #f1f2f3;
+  color: #61666d;
+}
+.bmt-ghost:hover { background: #e3e5e7; }
+
+/* ---------- Toast ---------- */
+.bmt-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 40px;
+  z-index: 2147483001;
+  max-width: 340px;
+  padding: 10px 16px;
+  background: rgba(24, 25, 28, 0.92);
+  color: #fff;
+  font-size: 13px;
+  border-radius: 8px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.28s ease, transform 0.28s ease;
+  pointer-events: none;
+  word-break: break-word;
+}
+.bmt-toast.bmt-toast-show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ---------- 收藏夹定位高亮 ---------- */
+.bmt-folder-hit {
+  outline: 2px solid #fb7299 !important;
+  outline-offset: 2px;
+  border-radius: 6px;
+  animation: bmt-pulse 0.9s ease-in-out 3;
+}
+
+@keyframes bmt-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 114, 153, 0.5); }
+  50%      { box-shadow: 0 0 0 8px rgba(251, 114, 153, 0); }
+}
+
+.bmt-hud-hint { color: #ffd166; margin-top: 3px; max-width: 280px; white-space: normal; }

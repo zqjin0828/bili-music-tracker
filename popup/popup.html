@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>B站听歌追踪器</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="head">
+    <div class="brand">
+      <span class="logo">🎵</span>
+      <span class="name">听歌追踪器</span>
+    </div>
+    <button id="btnSettings" class="icon-btn" title="设置">⚙</button>
+  </header>
+
+  <!-- 设置面板 -->
+  <section id="settingsPanel" class="panel hidden">
+    <div class="field">
+      <label>触发阈值（听几次提醒收藏）</label>
+      <input id="setThreshold" type="number" min="1" max="99" value="5">
+    </div>
+    <div class="field">
+      <label>收藏夹名称</label>
+      <input id="setFavName" type="text" value="歌" placeholder="歌">
+    </div>
+    <div class="field">
+      <label class="switch-row">
+        <input id="setVideoLevel" type="checkbox" checked>
+        <span>启用视频级计数（同一 BV 号听几次）</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="switch-row">
+        <input id="setSongLevel" type="checkbox" checked>
+        <span>启用歌曲级计数（同名翻唱跨视频合并）</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="switch-row">
+        <input id="setMergeSimilar" type="checkbox" checked>
+        <span>把 Live / 重制版并入原曲计数</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="switch-row">
+        <input id="setIncludeSuspect" type="checkbox">
+        <span>把「疑似音乐」也计入统计</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="switch-row">
+        <input id="setMutedCounts" type="checkbox" checked>
+        <span>静音时也计时</span>
+      </label>
+    </div>
+    <div class="row-2">
+      <div class="field">
+        <label>最少有效收听（秒）</label>
+        <input id="setMinSec" type="number" min="5" max="600" value="30">
+      </div>
+      <div class="field">
+        <label>有效收听比例</label>
+        <input id="setRatio" type="number" min="0.05" max="1" step="0.05" value="0.3">
+      </div>
+    </div>
+    <div class="hint-note">
+      ⓘ 实际门槛 = <b>较大者</b>（最少秒数，时长 × 比例）。<br>
+      例：5 分钟的歌按 0.3 算 → 需听满 <b>93 秒</b>，不是 30 秒。
+    </div>
+    <div class="field">
+      <label class="switch-row">
+        <input id="setDebugHud" type="checkbox" checked>
+        <span>显示调试面板（页面左下角，可看实时累计秒数；Alt+M 随时切换）</span>
+      </label>
+    </div>
+    <div class="settings-actions">
+      <button id="btnSave" class="btn primary">保存设置</button>
+      <button id="btnReset" class="btn ghost">恢复默认</button>
+    </div>
+
+    <hr class="sep">
+
+    <!-- ---------- AI 判定 ---------- -->
+    <div class="section-title">
+      <span>🤖 AI 判定</span>
+      <span class="section-hint">可选，用来提升长尾标题的准确率</span>
+    </div>
+
+    <div class="field">
+      <label>判定通道</label>
+      <select id="setAiChannel">
+        <option value="off">关闭（只用本地规则）</option>
+        <option value="queue">队列中转（推荐·无需在插件里存 Key）</option>
+        <option value="direct">直连 API（实时·需填 Key）</option>
+      </select>
+    </div>
+
+    <!-- 直连模式配置 -->
+    <div id="aiDirectBox" class="hidden">
+      <div class="field">
+        <label>API 端点（OpenAI 兼容）</label>
+        <input id="setAiEndpoint" type="text" placeholder="https://api.deepseek.com/v1/chat/completions">
+      </div>
+      <div class="field">
+        <label>API Key</label>
+        <input id="setAiKey" type="password" placeholder="sk-...">
+      </div>
+      <div class="field">
+        <label>模型名</label>
+        <input id="setAiModel" type="text" placeholder="deepseek-chat">
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label>置信度阈值</label>
+          <input id="setAiConf" type="number" min="0.1" max="1" step="0.05" value="0.85">
+        </div>
+        <div class="field">
+          <label>超时（毫秒）</label>
+          <input id="setAiTimeout" type="number" min="3000" max="60000" step="1000" value="10000">
+        </div>
+      </div>
+      <div class="field">
+        <button id="btnAiTest" class="btn ghost small">测试连接</button>
+        <span id="aiTestResult" class="test-result"></span>
+      </div>
+    </div>
+
+    <!-- 队列模式配置 -->
+    <div id="aiQueueBox" class="hidden">
+      <div class="queue-status" id="queueStatus">
+        <span id="queueCount">0</span> 个视频待判定
+      </div>
+      <div class="queue-actions">
+        <button id="btnQueueCopy" class="btn ghost small">复制队列</button>
+        <button id="btnQueueExport" class="btn ghost small">导出队列文件</button>
+        <button id="btnQueueClear" class="btn danger small">清空队列</button>
+      </div>
+      <div class="queue-actions">
+        <button id="btnResultImport" class="btn primary small">导入 AI 结果</button>
+        <input id="fileResults" type="file" accept="application/json" hidden>
+      </div>
+      <div class="ai-tip">
+        把队列交给我（WorkBuddy），或运行<br>
+        <code>node tools/process-queue.js --in queue.json --out results.json</code><br>
+        再把 results.json 导入回来即可。
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="switch-row">
+        <input id="setAiCache" type="checkbox" checked>
+        <span>永久缓存 AI 结果（每个视频只问一次）</span>
+      </label>
+    </div>
+
+    <div id="aiStatsBox" class="ai-stats">
+      <span id="aiStatsText">尚未调用 AI</span>
+    </div>
+
+    <hr class="sep">
+    <div class="data-actions">
+      <button id="btnExport" class="btn ghost small">导出数据</button>
+      <button id="btnImport" class="btn ghost small">导入数据</button>
+      <button id="btnClear" class="btn danger small">清空全部</button>
+    </div>
+    <input id="fileImport" type="file" accept="application/json" hidden>
+  </section>
+
+  <!-- 主视图 -->
+  <section id="mainPanel">
+    <div class="stats-row">
+      <div class="stat">
+        <div class="stat-num" id="statVideos">0</div>
+        <div class="stat-label">追踪视频</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num" id="statSongs">0</div>
+        <div class="stat-label">追踪歌曲</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num" id="statReached">0</div>
+        <div class="stat-label">已达标</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="songs">歌曲榜</button>
+      <button class="tab" data-tab="videos">视频榜</button>
+    </div>
+
+    <div id="list" class="list"></div>
+    <div id="empty" class="empty hidden">
+      <div class="empty-icon">🎧</div>
+      <div class="empty-text">还没有记录</div>
+      <div class="empty-sub">打开 B 站音乐视频听一会儿就会出现在这里</div>
+    </div>
+
+    <div class="hint" id="hint"></div>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

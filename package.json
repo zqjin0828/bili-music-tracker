@@ -1,0 +1,17 @@
+{
+  "name": "bili-music-tracker",
+  "version": "1.2.0",
+  "private": true,
+  "description": "B站听歌追踪器 — Chrome 扩展（含 AI 增强判定）",
+  "scripts": {
+    "test": "node test/run-all.js",
+    "test:parser": "node test/test-parser.js",
+    "test:ai": "node test/test-ai.js",
+    "test:client": "node test/test-ai-client.js",
+    "test:e2e": "node test/test-integration.js",
+    "queue": "node tools/process-queue.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
