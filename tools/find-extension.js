@@ -15,8 +15,8 @@ const path = require('path');
 const TARGET_KEY = 'B站听歌追踪器';
 
 const PROFILES = [
-  ['Chrome', '__HOME__/AppData/Local/Google/Chrome/User Data'],
-  ['Edge', '__HOME__/AppData/Local/Microsoft/Edge/User Data']
+  ['Chrome', 'C:/Users/Public/AppData/Local/Google/Chrome/User Data'],
+  ['Edge', 'C:/Users/Public/AppData/Local/Microsoft/Edge/User Data']
 ];
 
 function tmpCopy(src) {

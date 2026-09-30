@@ -14,3 +14,10 @@ Thumbs.db
 # 日志
 *.log
 npm-debug.log*
+
+# 发布脱敏脚本 —— 内含本机真实 id / 路径，**禁止入库**，
+# 仅供本地发布流程使用：node tools/sanitize-public.js <仓库目录>
+tools/sanitize-public.js
+
+# 截图 harness（引用真实 CSS 的构建源，只提交渲染产物 PNG）
+docs/screenshots/_src/

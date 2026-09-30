@@ -212,7 +212,7 @@ console.log('\n=== 默认设置 ===');
   console.log('\n=== 已收藏检测：在索引里 → 跳过计数 ★ ===');
   // 造一个含 BVFAV2 的索引
   await vm.runInContext(`chrome.storage.local.set({ favIndex: {
-    mediaId: __FAV_ID__, folderTitle:'歌',
+    mediaId: 1000000001, folderTitle:'歌',
     bvids: ['BVFAV2'], aids: [], count: 1, total: 1, hasMore: false, fetchedAt: Date.now()
   } })`, ctx);
 
@@ -271,11 +271,11 @@ console.log('\n=== 默认设置 ===');
 
   console.log('\n=== 收藏夹选择：真实列表里挑「歌」而不是「歌？」===');
   const picked = await vm.runInContext(`BiliFavIndex.pickFolder([
-    {id:1034822197,title:'默认收藏夹',media_count:281},
-    {id:__FAV_ID2__,title:'歌？',media_count:1},
-    {id:__FAV_ID__,title:'歌',media_count:276}
+    {id:1000000003,title:'默认收藏夹',media_count:281},
+    {id:1000000002,title:'歌？',media_count:1},
+    {id:1000000001,title:'歌',media_count:276}
   ], '歌')`, ctx);
-  eq(picked.folder.id, __FAV_ID__, '★ 选中真正的「歌」');
+  eq(picked.folder.id, 1000000001, '★ 选中真正的「歌」');
   eq(picked.reason, 'exact', '★ 精确匹配');
 
   // ============================================================
@@ -301,9 +301,9 @@ console.log('\n=== 默认设置 ===');
 
   console.log('\n=== v1.3.1 多夹滚动选夹 ===');
   const uf = await vm.runInContext(`BiliFavIndex.pickUsableFolder([
-    {id:1034822197,title:'默认收藏夹',media_count:281},
-    {id:__FAV_ID2__,title:'歌？',media_count:1},
-    {id:__FAV_ID__,title:'歌',media_count:1000},
+    {id:1000000003,title:'默认收藏夹',media_count:281},
+    {id:1000000002,title:'歌？',media_count:1},
+    {id:1000000001,title:'歌',media_count:1000},
     {id:4024088898,title:'歌2',media_count:12}
   ], '歌')`, ctx);
   eq(uf.folder.id, 4024088898, '★「歌」满了 → 自动切「歌2」');

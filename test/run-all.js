@@ -24,7 +24,9 @@ const SUITES = [
   ['test-integration.js', '端到端流程 / 幂等 / 降级'],
   ['test-service-worker.js', 'Service Worker 环境 / importScripts / 真实 background 链路'],
   ['test-detector-accuracy.js', '判定器准确率（对人工核对样本：召回/精确）'],
-  ['test-background.js', '后台标签页计时（定时器节流）/ seek / 倍速 / 阈值口径']
+  ['test-background.js', '后台标签页计时（定时器节流）/ seek / 倍速 / 阈值口径'],
+  ['test-hud.js', '调试面板特殊状态（已收藏 / 非音乐 / 索引降级 / 夹满…）'],
+  ['test-content-hud.js', 'content.js ↔ 调试面板联动（VM 里真实跑内容脚本）']
 ];
 
 const EXIT = { __runAllExit: true };

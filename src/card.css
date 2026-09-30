@@ -110,17 +110,45 @@
   z-index: 2147483000;
   padding: 8px 11px;
   border-radius: 8px;
-  background: rgba(24, 25, 28, 0.86);
+  background: rgba(24, 25, 28, 0.88);
   color: #fff;
   font: 11.5px/1.65 "Cascadia Mono", Consolas, "Microsoft YaHei", monospace;
   pointer-events: none;
   user-select: none;
-  max-width: 300px;
+  max-width: 340px;
   white-space: nowrap;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
 }
 .bmt-hud-row { display: block; }
 .bmt-hud-row b { color: #fb7299; font-weight: 600; margin-right: 2px; }
+
+/* ---------- 调试面板：状态分级染色 ----------
+ * 黄 = 不计数但符合预期（已收藏、静音、索引过期）
+ * 红 = 非预期（非音乐、索引不可用、夹满）
+ * 绿 = 好（已计入、已达阈值）
+ * 灰 = 纯信息
+ */
+.bmt-hud-row.is-ok   { color: #7ee787; }
+.bmt-hud-row.is-warn { color: #ffd166; }
+.bmt-hud-row.is-bad  { color: #ff7b72; }
+.bmt-hud-row.is-info { color: #9aa4b2; }
+/* b 标签在染色行里跟随行色，避免粉色和红/绿打架 */
+.bmt-hud-row.is-ok b, .bmt-hud-row.is-warn b,
+.bmt-hud-row.is-bad b, .bmt-hud-row.is-info b { color: inherit; }
+
+/* 顶部结论行：加粗 + 左侧色条，一眼可见 */
+.bmt-hud-head {
+  font-weight: 600;
+  margin: -3px -6px 3px;
+  padding: 3px 6px;
+  border-left: 3px solid currentColor;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.bmt-hud-foot { color: #6b7280; font-size: 10.5px; }
+.bmt-hud-dim { color: #8b949e; }
+/* 长文案换行 */
+.bmt-hud-wrap { white-space: normal; max-width: 320px; }
 
 .bmt-actions {
   display: flex;
@@ -192,4 +220,5 @@
   50%      { box-shadow: 0 0 0 8px rgba(251, 114, 153, 0); }
 }
 
+/* 保留旧类名（v1.3.1 及以前由 content.js 内联使用），行为与 .is-warn 一致 */
 .bmt-hud-hint { color: #ffd166; margin-top: 3px; max-width: 280px; white-space: normal; }

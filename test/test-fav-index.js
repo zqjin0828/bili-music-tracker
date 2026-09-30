@@ -25,20 +25,20 @@ function eq(actual, expected, label) {
 
 console.log('==== 1. pickFolder：真实收藏夹列表（含「歌？」干扰）====');
 const realFolders = [
-  { id: 1034822197, title: '默认收藏夹', media_count: 281, attr: 1 },
-  { id: __FAV_ID2__, title: '歌？', media_count: 1, attr: 22 },
-  { id: __FAV_ID__, title: '歌', media_count: 276, attr: 22 },
-  { id: 1124540497, title: '杂项', media_count: 3 },
-  { id: 1103054997, title: '鬼畜', media_count: 4 },
-  { id: 1057836897, title: '学习', media_count: 19 }
+  { id: 1000000003, title: '默认收藏夹', media_count: 281, attr: 1 },
+  { id: 1000000002, title: '歌？', media_count: 1, attr: 22 },
+  { id: 1000000001, title: '歌', media_count: 276, attr: 22 },
+  { id: 1000000004, title: '杂项', media_count: 3 },
+  { id: 1000000005, title: '鬼畜', media_count: 4 },
+  { id: 1000000006, title: '学习', media_count: 19 }
 ];
 const p1 = FavIndex.pickFolder(realFolders, '歌');
-eq(p1.folder && p1.folder.id, __FAV_ID__, '选中 media_id=__FAV_ID__（真正的「歌」）');
+eq(p1.folder && p1.folder.id, 1000000001, '选中 media_id=1000000001（真正的「歌」）');
 eq(p1.reason, 'exact', '匹配方式为 exact');
 
 console.log('\n==== 2. pickFolder：「歌？」不应被误选 ====');
 const onlyQuestion = [
-  { id: __FAV_ID2__, title: '歌？', media_count: 1 },
+  { id: 1000000002, title: '歌？', media_count: 1 },
   { id: 999, title: '默认收藏夹', media_count: 10 }
 ];
 const p2 = FavIndex.pickFolder(onlyQuestion, '歌');
@@ -94,7 +94,7 @@ eq(nf[2].title, '歌', '第 3 条是「歌」');
 console.log('\n==== 9. 真实索引数据判定（若存在）====');
 const folderFile = path.join(__dirname, '..', '..', '..', '..', 'AppData', 'Local', 'Temp', 'gh-push', 'folder-bvids.json');
 // 换个更稳的路径：直接找 probe 输出的样本
-const altPath = '__HOME__/AppData/Local/Temp/gh-push/folder-bvids.json';
+const altPath = 'C:/Users/Public/AppData/Local/Temp/gh-push/folder-bvids.json';
 let idxPath = fs.existsSync(altPath) ? altPath : (fs.existsSync(folderFile) ? folderFile : null);
 if (idxPath) {
   const j = JSON.parse(fs.readFileSync(idxPath, 'utf8'));

@@ -17,7 +17,7 @@ const ROOT = path.resolve(__dirname, '..');
 global.BiliParser = require(path.join(ROOT, 'src', 'parser.js'));
 const D = require(path.join(ROOT, 'src', 'detector.js'));
 
-const FAV = '__HOME__/WorkBuddy/2026-09-18-01-36-00/bili-fav-from-history';
+const FAV = 'C:/Users/Public/WorkBuddy/2026-09-18-01-36-00/bili-fav-from-history';
 const f5 = JSON.parse(fs.readFileSync(path.join(FAV, 'final.json'), 'utf8'));
 const f34 = JSON.parse(fs.readFileSync(path.join(FAV, 'final34.json'), 'utf8'));
 const cache = JSON.parse(fs.readFileSync(path.join(FAV, 'enrich-cache.json'), 'utf8'));

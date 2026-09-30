@@ -17,6 +17,7 @@
   const Parser = window.BiliParser;
   const Detector = window.BiliDetector;
   const Ai = window.BiliAi;   // 可空：仅用于展示 AI 判断依据
+  const Hud = window.BiliHud; // 调试面板渲染（纯函数，可单测）
 
   // ---------- 常量 ----------
   const SAMPLE_MS = 500;          // 采样间隔
@@ -41,7 +42,27 @@
       lastTickTs: 0,         // 上次采样时刻（墙钟）
       lastCt: 0,             // 上次采样的视频进度（秒）★ 新增
       counted: false,        // 本次会话是否已计数
-      seeking: false
+      seeking: false,
+      // ★ v1.3.2：为什么累计没涨 —— 让 HUD 能解释「秒数不动」的原因
+      dropped: {
+        seek: 0,             // 拖动进度条导致被截断的次数
+        mutedSec: 0,         // 因静音未计入的秒数
+        noAdvance: 0         // 播放中但进度未推进的次数
+      }
+    },
+    // ★ v1.3.2：调试面板的现场数据（原来只有累计秒数，特殊状态一律看不到）
+    hud: {
+      lastReport: null,      // 上次 RECORD_PLAY 的结果 {counted, reason, ...}
+      counts: { video: null, song: null },
+      fav: {                 // 当前视频的收藏检测结果
+        known: false, faved: false, source: 'none', folder: '', checkedAt: 0
+      },
+      index: {               // 后台收藏夹索引的可用性
+        known: false, ok: false, stale: false, count: null, title: '', ageMs: null
+      },
+      folders: null,         // 收藏夹容量 {title, cap:{count,cap,remain,ratio}, nextName}
+      ai: null,              // AI 判定情况
+      notice: null           // 一次性提示（如「已收藏，跳过弹卡」）
     },
     timer: null,
     cards: []
@@ -163,6 +184,7 @@
     s.seeking = false;
     s.lastTickTs = Date.now();
     s.lastCt = state.videoEl ? state.videoEl.currentTime : 0;
+    s.dropped = { seek: 0, mutedSec: 0, noAdvance: 0 };
   }
 
   /** 当前「需要听多少秒」才算一次 —— HUD 与判定共用，避免口径不一致 */
@@ -233,8 +255,18 @@
         const expected = wallSec * rate;
         const cap = Math.max(expected * 1.2 + 1, 1.5);
         s.accumulatedMs += Math.min(ctSec, cap) * 1000;
+        // ★ v1.3.2：进度跳变远大于墙钟预期 → 判定为拖动，记一笔供 HUD 解释
+        if (ctSec > cap + 0.5) s.dropped.seek += 1;
       }
       // ctSec <= 0：回退或重播同一段，不重复累计（拖动后重新播放会再次累计）
+      else if (ctSec <= 0 && !v.paused && !v.ended && !s.seeking) {
+        // 播放中但进度没推进 —— 卡缓冲 / 直播流 / 循环同一段
+        s.dropped.noAdvance += 1;
+      }
+    } else if (!playing && !v.paused && !v.ended && v.muted && state.settings.mutedCounts === false && s.lastTickTs) {
+      // ★ v1.3.2：静音且设置里不允许静音计时 → 秒数不涨，但用户需要知道原因
+      const wallSec = (now - s.lastTickTs) / 1000;
+      if (wallSec > 0 && wallSec < 24 * 3600) s.dropped.mutedSec += wallSec;
     }
 
     s.lastCt = ct;
@@ -307,6 +339,49 @@
       if (res && res.ok) {
         const d = res.data || {};
 
+        // ★ v1.3.2：把上报结果落到 HUD 现场，这样「为什么没计数」有据可查。
+        //   旧版这里 return 了就完事，HUD 上什么也看不到 —— 用户只看到
+        //   「累计 100%」却不见次数增加，完全无从判断。
+        state.hud.lastReport = {
+          counted: d.counted !== false,
+          reason: d.reason || '',
+          favedSource: d.favedSource || '',
+          videoPlayCount: d.videoPlayCount != null ? d.videoPlayCount : null,
+          songPlayCount: d.songPlayCount != null ? d.songPlayCount : null,
+          detail: d.detail || '',
+          at: Date.now()
+        };
+        if (d.videoPlayCount != null || d.songPlayCount != null) {
+          state.hud.counts = {
+            video: d.videoPlayCount != null ? d.videoPlayCount : state.hud.counts.video,
+            song: d.songPlayCount != null ? d.songPlayCount : state.hud.counts.song
+          };
+        }
+        // 后台判成已收藏 → 同步到 fav 现场，HUD 顶部结论会立刻变成「不计数：已在…」
+        if (d.counted === false && d.reason === 'already-faved') {
+          state.hud.fav.known = true;
+          state.hud.fav.faved = true;
+          state.hud.fav.source = d.favedSource || 'index';
+          state.hud.fav.checkedAt = Date.now();
+          state.hud.notice = { text: '已在收藏夹 → 已跳过计数与弹卡', level: 'warn' };
+        } else if (d.favedSource && d.favedSource !== 'none') {
+          state.hud.fav.known = true;
+          state.hud.fav.faved = true;
+          state.hud.fav.source = d.favedSource;
+          state.hud.fav.checkedAt = Date.now();
+        }
+        // AI 处理情况回填
+        const ai = d.ai;
+        if (ai) {
+          state.hud.ai = Object.assign({}, state.hud.ai, {
+            channel: ai.source || (state.hud.ai && state.hud.ai.channel) || 'queue',
+            queued: !!ai.queued,
+            failed: ai.failed || '',
+            pending: ai.pending != null ? ai.pending : (state.hud.ai && state.hud.ai.pending)
+          });
+        }
+        updateHud();
+
         // ★ 已收藏 → 明确告诉用户「不再计数」，而不是静默丢弃
         if (d.counted === false && d.reason === 'already-faved') {
           showToast('这首已在「歌」收藏夹，不再计数 ✓');
@@ -323,7 +398,6 @@
           showToast(`已听 ${maxCount} / ${state.settings.threshold} 次`);
         }
         // 提示 AI 处理情况（只在队列模式下提示一次，不打扰）
-        const ai = d.ai;
         if (ai && ai.source === 'queue' && ai.queued) {
           log('已加入 AI 判定队列');
         } else if (ai && ai.source === 'direct' && ai.failed) {
@@ -332,6 +406,12 @@
       }
     } catch (e) {
       log('上报失败（扩展可能已更新，刷新页面即可）', e);
+      state.hud.lastReport = {
+        counted: false, reason: 'no-video',
+        detail: '与后台通信失败，刷新页面后重试',
+        at: Date.now()
+      };
+      updateHud();
     }
   }
 
@@ -688,6 +768,14 @@
 
     log('解析结果', state.parsed, '判定', state.detection);
 
+    // ★ v1.3.2：异步取「这支是否已收藏 / 索引是否可用 / 夹容量」，供 HUD 展示。
+    //   以前这些信息只有在播完一轮后由后台间接透露，HUD 还不显示 ——
+    //   现在一进页面就知道，不必等到「累计 100% 却不计数」才困惑。
+    refreshFavContext().catch(() => { /* ignore */ });
+
+    // ★ v1.3.2：把解析出的曲目立即反映到 HUD
+    updateHud();
+
     // 若分区缺失（隔离世界读不到页面状态），异步补一次 API 元数据后重新判定
     if ((!meta.tid || !meta.up) && !state.apiRequested) {
       state.apiRequested = true;
@@ -727,6 +815,17 @@
     return !!(state.settings && state.settings.debugHud);
   }
 
+  /** 换视频时清掉「属于上一支」的现场数据，保留索引/容量这类全局信息 */
+  function resetHudForVideo() {
+    const h = state.hud;
+    h.lastReport = null;
+    h.counts = { video: null, song: null };
+    h.notice = null;
+    h.ai = null;
+    h.fav = { known: false, faved: false, source: 'none', folder: '', checkedAt: 0 };
+    updateHud();
+  }
+
   function updateHud() {
     if (!hudEnabled()) {
       if (hudEl) { hudEl.remove(); hudEl = null; }
@@ -741,27 +840,145 @@
       document.body.appendChild(hudEl);
     }
 
+    hudEl.innerHTML = Hud.render(buildHudCtx(v));
+  }
+
+  /** 把当前状态整理成 BiliHud.render 需要的入参（纯数据，无 DOM 依赖） */
+  function buildHudCtx(v) {
     const { need, finish, duration } = needSeconds();
-    const have = state.session.accumulatedMs / 1000;
+    const s = state.session;
+    const have = s.accumulatedMs / 1000;
     const pct = need > 0 ? Math.min(100, Math.round(have / need * 100)) : 0;
-    const d = state.detection || {};
-    const vis = document.visibilityState === 'hidden' ? '后台' : '前台';
+    const hud = state.hud;
+    const now = Date.now();
+    const ago = (ts) => (ts ? Math.max(0, now - ts) : null);
 
-    // 判定为非音乐时给出可操作提示 —— 这类视频不会计数，
-    // 需要用户去弹窗手动「标为音乐」
-    const hint = d.isMusic ? '' :
-      '<div class="bmt-hud-row bmt-hud-hint">未判定为音乐 → 不会计数。可在弹窗里「标为音乐」</div>';
+    // 时长未知时 need 会退化成「最少秒数」，此时「听完 85%」这条分支不可用
+    const reached = have >= need || (isFinite(finish) && have >= finish);
 
-    hudEl.innerHTML =
-      '<div class="bmt-hud-row"><b>累计</b> ' + have.toFixed(1) + 's / 需 ' + need.toFixed(0) + 's (' + pct + '%)</div>' +
-      '<div class="bmt-hud-row"><b>状态</b> ' + (v.paused ? '暂停' : (v.ended ? '结束' : '播放中')) +
-        ' · ' + vis + ' · ' + (v.muted ? '静音' : '有声') + '</div>' +
-      '<div class="bmt-hud-row"><b>判定</b> ' + (d.isMusic ? '音乐' : '非音乐') +
-        ' ' + (d.confidence != null ? d.confidence.toFixed(2) : '-') +
-        ' · 时长 ' + (duration ? duration.toFixed(0) + 's' : '?') + '</div>' +
-      '<div class="bmt-hud-row"><b>会话</b> ' + (state.session.counted ? '已计入' : '未计入') +
-        ' · tick ' + SAMPLE_MS + 'ms</div>' +
-      hint;
+    const d = state.detection || null;
+    // 判定器可能只给 tid，补上 tname 便于阅读
+    const det = d ? {
+      isMusic: !!d.isMusic,
+      confidence: d.confidence,
+      tid: state.meta.tid || 0,
+      tname: state.meta.tname || '',
+      isCompilation: !!d.isCompilation,
+      manualOverride: !!d.manualOverride
+    } : null;
+
+    return {
+      have, need, duration, pct, reached,
+      detection: det,
+      parsed: state.parsed ? {
+        songName: state.parsed.songName,
+        version: state.parsed.version,
+        artist: state.parsed.artist
+      } : null,
+      playState: {
+        paused: v.paused, ended: v.ended, muted: v.muted,
+        rate: v.playbackRate || 1,
+        background: document.visibilityState === 'hidden'
+      },
+      session: {
+        counted: s.counted,
+        sampleMs: SAMPLE_MS,
+        dropped: s.dropped
+      },
+      fav: {
+        known: hud.fav.known,
+        faved: hud.fav.faved,
+        source: hud.fav.source,
+        folder: hud.fav.folder || (state.settings && state.settings.favFolderName) || '歌',
+        checkedAgoMs: ago(hud.fav.checkedAt)
+      },
+      index: {
+        known: hud.index.known,
+        ok: hud.index.ok,
+        stale: hud.index.stale,
+        count: hud.index.count,
+        title: hud.index.title,
+        ageMs: hud.index.ageMs
+      },
+      folders: hud.folders,
+      counts: hud.counts,
+      lastReport: hud.lastReport ? Object.assign({}, hud.lastReport, {
+        agoMs: ago(hud.lastReport.at)
+      }) : null,
+      ai: hud.ai,
+      settings: state.settings || {},
+      notice: hud.notice
+    };
+  }
+
+  // ---------- 现场数据采集（供 HUD 显示特殊状态） ----------
+
+  /**
+   * ★ v1.3.2：取一次「当前视频是否已收藏」+「索引是否可用」+「夹容量」。
+   *
+   * 旧的 HUD 只有在播完一轮、后台返回 already-faved 之后才间接暴露这件事，
+   * 而且还不显示。现在**一进页面就主动查**，用户不播也能看到「这首已收藏」。
+   */
+  async function refreshFavContext(force) {
+    const bvid = state.meta.bvid;
+    const fav = state.hud.fav;
+    const base = (state.settings && state.settings.favFolderName) || '歌';
+
+    // 同一支视频 60 秒内不重复查（避免每次路由抖动都打后台）
+    if (!force && fav.known && bvid && fav.bvid === bvid && Date.now() - fav.checkedAt < 60000) return;
+
+    // ---- 已收藏检测：DOM 实时状态优先，索引兜底 ----
+    let domFaved = false;
+    try { domFaved = readDomFaved(); } catch (e) { /* ignore */ }
+
+    let idxFaved = false, hitTitle = '', idxStale = false, idxCount = null;
+    if (bvid) {
+      try {
+        const r = await chrome.runtime.sendMessage({ type: 'FAV_CHECK_BVID', bvid });
+        const d = (r && r.data) || null;
+        if (d) {
+          idxFaved = !!d.faved;
+          hitTitle = d.folderTitle || '';
+          idxStale = !!d.stale;
+          idxCount = d.indexCount != null ? d.indexCount : null;
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    fav.bvid = bvid;
+    fav.faved = !!(domFaved || idxFaved);
+    fav.source = domFaved ? 'dom' : (idxFaved ? 'index' : 'none');
+    fav.folder = hitTitle || base;
+    fav.known = !!bvid;
+    fav.checkedAt = Date.now();
+
+    // ---- 索引可用性 + 夹容量 ----
+    let ixOk = false, ixCount = idxCount, ixTitle = base, ixAgeMs = null, cap = null, nextName = '';
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'FAV_GET_STATUS' });
+      const d = (r && r.data) || null;
+      if (d) {
+        ixOk = !!d.hasIndex;
+        ixCount = d.count != null ? d.count : idxCount;
+        ixTitle = d.folderTitle || base;
+        ixAgeMs = d.fetchedAt ? Math.max(0, Date.now() - d.fetchedAt) : null;
+        idxStale = d.stale != null ? !!d.stale : idxStale;
+        cap = d.cap || null;
+        nextName = d.nextName || '';
+      }
+    } catch (e) { /* ignore */ }
+
+    state.hud.index = {
+      known: true,
+      ok: ixOk,
+      stale: idxStale,
+      count: ixCount,
+      title: ixTitle,
+      ageMs: ixAgeMs
+    };
+    state.hud.folders = cap ? { title: ixTitle, cap, nextName } : null;
+
+    updateHud();
   }
 
   window.addEventListener('keydown', (e) => {
@@ -914,6 +1131,7 @@
     log('路由变化', location.href);
     removeCards();
     resetSession();
+    resetHudForVideo();
     // 换视频了：清掉上一支的元数据缓存，重新取
     state.apiMeta = null;
     state.apiRequested = false;
@@ -957,6 +1175,7 @@
       //   此时不该再打扰用户。用后台索引 + DOM 双重确认。
       (async () => {
         const toShow = [];
+        let skippedFaved = 0;
         for (const n of list.slice(0, 2)) {
           const bvid = n.bvid || '';
           let faved = readDomFaved();          // DOM 实时状态优先
@@ -971,9 +1190,29 @@
 
           if (faved) {
             log('已收藏，跳过提醒卡片', bvid);
+            skippedFaved++;
             continue;
           }
           toShow.push(n);
+        }
+
+        // ★ v1.3.2：把「跳过了几张卡、为什么」写进 HUD 现场，
+        //   否则用户只会觉得「达标了怎么没弹卡」，无处可查。
+        if (skippedFaved && !toShow.length) {
+          state.hud.fav.known = true;
+          state.hud.fav.faved = true;
+          state.hud.fav.checkedAt = Date.now();
+          state.hud.notice = {
+            text: '已收藏 → 本次跳过 ' + skippedFaved + ' 张提醒卡',
+            level: 'warn'
+          };
+          updateHud();
+        } else if (skippedFaved) {
+          state.hud.notice = {
+            text: '已收藏 → 跳过 ' + skippedFaved + ' 张卡，仅弹 ' + toShow.length + ' 张',
+            level: 'info'
+          };
+          updateHud();
         }
 
         if (toShow.length) toShow.forEach(showThresholdCard);
