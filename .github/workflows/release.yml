@@ -1,0 +1,90 @@
+name: Release
+
+# 打 tag 时自动发版；也可手动触发（Actions 页面点 Run workflow）
+#
+# 设计说明：
+#   · 用 `gh release create`（runner 预装 gh），**不依赖第三方 action**
+#   · 发版前先跑测试，测试不过就不发
+#   · zip 由 tools/pack.js 在 runner 上现场打包，与本地 build 同一套逻辑，
+#     因此不需要把二进制提交进仓库
+#   · 已存在同名 Release 时改为覆盖上传资产（可重复执行）
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（留空则用当前 ref；已存在同名 Release 时覆盖资产）'
+        required: false
+        type: string
+
+permissions:
+  contents: write        # 创建 Release / 上传资产需要
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run tests
+        run: node test/run-all.js
+
+      - name: Pack extension
+        run: node tools/pack.js
+
+      - name: Verify zip
+        run: node tools/verify-zip.js
+
+      - name: Resolve version
+        id: ver
+        run: |
+          V=$(node -p "require('./manifest.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+          echo "zip=dist/bili-music-tracker-v$V.zip" >> "$GITHUB_OUTPUT"
+          echo "notes=docs/releases/v$V.md" >> "$GITHUB_OUTPUT"
+          echo "resolved: v$V"
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          ZIP: ${{ steps.ver.outputs.zip }}
+          NOTES: ${{ steps.ver.outputs.notes }}
+        run: |
+          set -euo pipefail
+          ls -l "$ZIP"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在 → 覆盖上传资产"
+            gh release upload "$TAG" "$ZIP" --clobber
+          else
+            echo "创建 Release $TAG"
+            if [ -f "$NOTES" ]; then
+              gh release create "$TAG" "$ZIP" --title "$TAG" --notes-file "$NOTES"
+            else
+              gh release create "$TAG" "$ZIP" --title "$TAG" --generate-notes
+            fi
+          fi
+
+      - name: Summary
+        run: |
+          echo "### 已发布 ${{ steps.ver.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 资产：\`${{ steps.ver.outputs.zip }}\`" >> "$GITHUB_STEP_SUMMARY"
+          sha256sum "${{ steps.ver.outputs.zip }}" >> "$GITHUB_STEP_SUMMARY" || true
