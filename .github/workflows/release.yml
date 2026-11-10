@@ -70,13 +70,35 @@ jobs:
         run: |
           set -euo pipefail
           ls -l "$ZIP"
+
+          # ★ 发布说明可能不在 tag 提交里（tag 往往早于说明文件的补充），
+          #   所以找不到就退回默认分支上取，避免静默变成自动生成的 changelog。
+          NOTES_SRC=""
+          if [ -f "$NOTES" ]; then
+            NOTES_SRC="$NOTES"
+            echo "说明文件来自当前 ref: $NOTES"
+          else
+            echo "当前 ref 无 $NOTES，改从默认分支取"
+            git fetch --depth 1 origin main
+            if git show "origin/main:$NOTES" > /tmp/release-notes.md 2>/dev/null; then
+              NOTES_SRC="/tmp/release-notes.md"
+              echo "说明文件来自 origin/main"
+            else
+              echo "::warning::找不到 $NOTES，将使用自动生成的 changelog"
+            fi
+          fi
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在 → 覆盖上传资产"
+            echo "Release $TAG 已存在 → 覆盖资产"
             gh release upload "$TAG" "$ZIP" --clobber
+            # 已存在的 Release 也要同步正文，保证可重复执行
+            if [ -n "$NOTES_SRC" ]; then
+              gh release edit "$TAG" --notes-file "$NOTES_SRC"
+            fi
           else
             echo "创建 Release $TAG"
-            if [ -f "$NOTES" ]; then
-              gh release create "$TAG" "$ZIP" --title "$TAG" --notes-file "$NOTES"
+            if [ -n "$NOTES_SRC" ]; then
+              gh release create "$TAG" "$ZIP" --title "$TAG" --notes-file "$NOTES_SRC"
             else
               gh release create "$TAG" "$ZIP" --title "$TAG" --generate-notes
             fi
