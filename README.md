@@ -274,8 +274,9 @@ AI 纠正为 千本桜|original
 
 #### 方式 A：下载 Release 压缩包（推荐普通用户）
 
-1. 到 [Releases](https://github.com/zqjin0828/bili-music-tracker/releases) 下载最新的
-   `bili-music-tracker-v1.3.2.zip`
+1. **直接下载**：
+   [bili-music-tracker-v1.3.2.zip](https://github.com/zqjin0828/bili-music-tracker/releases/download/v1.3.2/bili-music-tracker-v1.3.2.zip)
+   （或到 [Releases](https://github.com/zqjin0828/bili-music-tracker/releases) 页面挑版本）
 2. **解压**到一个固定目录（比如 `%USERPROFILE%\bili-music-tracker`）
 3. 打开 `chrome://extensions/` → 右上角开「**开发者模式**」
 4. 点左上角「**加载已解压的扩展程序**」→ 选择**解压出的那个文件夹**
@@ -670,6 +671,13 @@ bili-music-tracker/
 │
 ├── icons/                     # 图标（16 / 48 / 128）
 │
+├── .github/workflows/
+│   └── release.yml            #   ★ 自动发版：跑测试 → 打包 → 建 Release 挂 zip
+│
+├── docs/
+│   ├── releases/              #   Release 正文（v<版本>.md，workflow 读取）
+│   └── screenshots/           #   README 配图（渲染产物 PNG，harness 已 gitignore）
+│
 ├── DESIGN.md                  # 原本地规则方案设计
 ├── DESIGN-AI.md               # AI 接入方案（架构 / prompt / 成本 / 降级）
 ├── AI-SETUP.md                # AI 接入实操步骤
@@ -682,12 +690,27 @@ bili-music-tracker/
 **打包产物**：
 
 ```bash
-node tools/pack.js
-# → dist/bili-music-tracker-v1.3.2.zip
+node tools/pack.js        # → dist/bili-music-tracker-v1.3.2.zip
+node tools/verify-zip.js  # 逐条解压做字节比对 + 包内引用完整性
 ```
 
 打包脚本会**从 manifest 自动推导清单**并做**自检** ——
 manifest 声明但没打进包的文件会导致构建失败（这个机制曾抓出过一个幽灵文件声明）。
+
+**发版是全自动的**（`.github/workflows/release.yml`）：
+
+```bash
+git tag -a v1.3.3 -m "..." && git push origin v1.3.3
+# → GitHub Actions 自动：跑 449 项测试 → pack.js 打包 → verify-zip.js 校验
+#   → gh release create 建 Release 并挂上 zip
+```
+
+也可以在 Actions 页面手动 **Run workflow**，指定要发布的 tag（留空则用当前分支）。
+已存在同名 Release 时改为覆盖资产 + 同步正文，**可重复执行**。
+因此 zip **不需要手工上传**，也**不进仓库**（`dist/` 已 gitignore）。
+
+Release 正文取自 `docs/releases/v<版本>.md`；找不到时会退回默认分支取，
+再找不到才用自动 changelog。
 
 ---
 
@@ -922,6 +945,12 @@ v1.3.1 已修复。旧版降级跳转用的是 `https://space.bilibili.com/favli
 - `src/hud.js` —— 调试面板渲染抽成**纯函数**（无 DOM 依赖），因此可被单元测试直接覆盖
 - `test/test-hud.js` —— **65 项**断言，覆盖已收藏 / 非音乐 / 已排除 / 静音 /
   合辑 / 索引不可用或过期 / 夹满 / 上报被拒 / AI 降级 / 丢弃统计 / HTML 转义 / 优先级
+
+**工程**
+
+- `.github/workflows/release.yml` —— **发版全自动化**：`git push` 一个 tag，
+  云端跑完测试 → 打包 → 校验 → 建 Release 并挂上 zip。不再需要手工上传压缩包
+- `docs/releases/v1.3.2.md` —— Release 正文入库，跟着代码一起版本管理
 
 **验证**：449 项断言全通过（本轮新增 98 项：`test-hud.js` 65 项 + `test-content-hud.js` 33 项）
 
